@@ -1,7 +1,8 @@
+joblib
 matplotlib
 numpy
 pandas
 scikit-learn
 scipy
-tensorflow
+tensorflow==2.15.0
 xgboost
