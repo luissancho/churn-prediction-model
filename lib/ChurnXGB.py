@@ -10,6 +10,9 @@ from sklearn.cluster import KMeans
 from sklearn.utils import shuffle
 from xgboost.sklearn import XGBClassifier
 
+from typing import Optional
+from typing_extensions import Self
+
 from sklearn.metrics import (
     accuracy_score,
     auc,
@@ -26,7 +29,14 @@ from .utils import format_number, get_color
 
 class ChurnXGB(object):
 
-    def __init__(self, features=None, seed=42, verbose=0, path=None, **kwargs):
+    def __init__(
+        self,
+        features: Optional[list[str]] = None,
+        seed: int = 42,
+        verbose: int = 0,
+        path: Optional[str] = None,
+        **kwargs
+    ):
         # Column names
         self.id_col = 'id'  # User ID
         self.tfs_col = 'tfs'  # Current cycle
@@ -35,7 +45,7 @@ class ChurnXGB(object):
         # Execution params
         self.seed = seed  # Base random seed
         self.verbose = verbose  # Print progress
-        self.path = path or os.getcwd()  # Path to store model files
+        self.path = self.set_path(path)  # Path to store model files
 
         # Model params
         self.params = {
@@ -71,7 +81,7 @@ class ChurnXGB(object):
             'recall': .0
         }
 
-    def build_model(self):
+    def build_model(self) -> XGBClassifier:
         subsample = None
         colsample_bytree = None
         if isinstance(self.params['dropout'], np.ndarray):
@@ -98,7 +108,13 @@ class ChurnXGB(object):
 
         return model
 
-    def fit(self, x_train, y_train, x_test, y_test):
+    def fit(
+        self,
+        x_train: np.ndarray,
+        y_train: np.ndarray,
+        x_test: np.ndarray,
+        y_test: np.ndarray
+    ) -> Self:
         # Build sequences
         x_train, y_train, _ = self.input_seq(x_train, y_train, shuffle_data=self.params['shuffle'])
         x_test, y_test, _ = self.input_seq(x_test, y_test)
@@ -127,7 +143,10 @@ class ChurnXGB(object):
 
         return self
 
-    def predict(self, x):
+    def predict(
+        self,
+        x: np.ndarray
+    ) -> np.ndarray:
         # Load model
         if self.model is None:
             self.load()
@@ -143,7 +162,11 @@ class ChurnXGB(object):
 
         return y_pred
 
-    def set_results(self, y_pred, y_true=None):
+    def set_results(
+        self,
+        y_pred: np.ndarray,
+        y_true: Optional[np.ndarray] = None
+    ) -> Self:
         y_pred = self.seq_to_df(y_pred)
 
         if y_true is not None:
@@ -177,7 +200,10 @@ class ChurnXGB(object):
 
         return self
 
-    def build_seq(self, data):
+    def build_seq(
+        self,
+        data: pd.DataFrame
+    ) -> tuple[np.ndarray, np.ndarray]:
         if self.features is None:
             self.features = list(data.columns[~data.columns.isin([self.id_col, self.tfs_col, self.tgt_col])])
 
@@ -192,7 +218,12 @@ class ChurnXGB(object):
 
         return x, y
 
-    def input_seq(self, x, y=None, shuffle_data=False):
+    def input_seq(
+        self,
+        x: np.ndarray,
+        y: Optional[np.ndarray] = None,
+        shuffle_data: bool = False
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         z = x[:, :2]
         x = x[:, 3:]
         if y is not None:
@@ -206,7 +237,11 @@ class ChurnXGB(object):
 
         return x, y, z
 
-    def output_seq(self, y, z):
+    def output_seq(
+        self,
+        y: np.ndarray,
+        z: np.ndarray
+    ) -> np.ndarray:
         n_seq = y.shape[0]
 
         y = y.reshape(n_seq, 1)
@@ -214,7 +249,11 @@ class ChurnXGB(object):
 
         return seq
 
-    def seq_to_df(self, x, y=None):
+    def seq_to_df(
+        self,
+        x: np.ndarray,
+        y: Optional[np.ndarray] = None
+    ) -> pd.DataFrame:
         n_feat = len(self.features)
 
         if y is not None:
@@ -225,7 +264,12 @@ class ChurnXGB(object):
 
         return df
 
-    def get_columns(self, x, exclude=None, dtypes=None):
+    def get_columns(
+        self,
+        x: pd.DataFrame,
+        exclude: Optional[list[str]] = None,
+        dtypes: Optional[list[str]] = None
+    ) -> list[str]:
         exclude = exclude or []
         dtypes = dtypes or []
 
@@ -239,7 +283,11 @@ class ChurnXGB(object):
 
         return list(c)
     
-    def get_clusters(self, y, n):
+    def get_clusters(
+        self,
+        y: pd.Series,
+        n: int
+    ) -> pd.Series:
         cm = KMeans(
             n_clusters=n,
             random_state=self.seed
@@ -253,7 +301,11 @@ class ChurnXGB(object):
 
         return c
 
-    def precision_recall(self, y_true, y_pred):
+    def precision_recall(
+        self,
+        y_true: np.ndarray,
+        y_pred: np.ndarray
+    ) -> tuple[float, list[float], list[float], list[float], list[float]]:
         f1 = []
         precision = []
         recall = []
@@ -271,7 +323,11 @@ class ChurnXGB(object):
 
         return thr, thrs, f1, precision, recall
 
-    def plot_scores(self, show=True, file=None):
+    def plot_scores(
+        self,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
         summary = ['Thereshold: {}%'.format(format_number(self.thr * 100, 0))]
         for key, val in self.scores.items():
             summary.append('{}: {}%'.format(key.upper(), format_number(val * 100, 0)))
@@ -288,7 +344,12 @@ class ChurnXGB(object):
 
         self.plot_figure(fig=fig, show=show, file=file)
 
-    def plot_roc_curve(self, ax=None, show=True, file=None):
+    def plot_roc_curve(
+        self,
+        ax: Optional[plt.Axes] = None,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
         y_true = self.results['true']
         y_pred = self.results['pred']
 
@@ -332,7 +393,12 @@ class ChurnXGB(object):
 
         self.plot_figure(fig=fig, show=show, file=file)
 
-    def plot_precision_recall(self, ax=None, show=True, file=None):
+    def plot_precision_recall(
+        self,
+        ax: Optional[plt.Axes] = None,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
         y_true = self.results['true']
         y_pred = self.results['pred']
 
@@ -384,7 +450,12 @@ class ChurnXGB(object):
 
         self.plot_figure(fig=fig, show=show, file=file)
 
-    def plot_feature_importances(self, ax=None, show=True, file=None):
+    def plot_feature_importances(
+        self,
+        ax: Optional[plt.Axes] = None,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
         fimp = pd.Series(self.model.feature_importances_, index=self.features).sort_values(ascending=False)
 
         if ax is None:
@@ -403,7 +474,12 @@ class ChurnXGB(object):
 
         self.plot_figure(fig=fig, show=show, file=file)
 
-    def plot_confusion_matrix(self, ax=None, show=True, file=None):
+    def plot_confusion_matrix(
+        self,
+        ax: Optional[plt.Axes] = None,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
         y_true = self.results['true']
         y_pred = self.results['pred']
         y_tgt = np.array([1 if i > self.thr else 0 for i in y_pred])
@@ -439,7 +515,14 @@ class ChurnXGB(object):
 
         self.plot_figure(fig=fig, show=show, file=file)
 
-    def plot_histogram(self, y, loc=-1, ax=None, show=True, file=None):
+    def plot_histogram(
+        self,
+        y: pd.DataFrame,
+        loc: int = -1,
+        ax: Optional[plt.Axes] = None,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
         if loc:
             y = y.sort_values(self.tfs_col).groupby(self.id_col).nth(loc).reset_index()
 
@@ -459,7 +542,12 @@ class ChurnXGB(object):
 
         self.plot_figure(fig=fig, show=show, file=file)
 
-    def plot_history_eval(self, ax=None, show=True, file=None):
+    def plot_history_eval(
+        self,
+        ax: Optional[plt.Axes] = None,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
         if self.history.empty:
             return
         
@@ -486,7 +574,12 @@ class ChurnXGB(object):
 
         self.plot_figure(fig=fig, show=show, file=file)
     
-    def plot_figure(self, fig=None, show=True, file=None):
+    def plot_figure(
+        self,
+        fig: plt.Figure = None,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
         if fig is not None:
             if show:
                 plt.show()
@@ -499,30 +592,38 @@ class ChurnXGB(object):
             plt.clf()
             plt.close('all')
 
-    def get_path(self, name: str) -> str:
-        if not os.path.exists('{}/{}'.format(os.getcwd(), self.path)):
-            os.makedirs('{}/{}'.format(os.getcwd(), self.path))
+    def set_path(self, path: str) -> str:
+        if not path:
+            path = os.getcwd()
+        elif not path.startswith('/'):
+            path = f'{os.getcwd()}/{path}'
 
-        return '{}/{}/{}'.format(os.getcwd(), self.path, name)
+        if not os.path.exists(path):
+            os.makedirs(path)
+        
+        return path
+
+    def get_path(self, name: str) -> str:
+        return f'{self.path}/{name}'
 
     def file_exists(self, name: str) -> bool:
         return os.path.isfile(self.get_path(name))
 
-    def model_exists(self):
+    def model_exists(self) -> bool:
         return self.file_exists('model.pkl')
     
-    def model_save(self, model):
+    def model_save(self, model: XGBClassifier) -> str:
         path = self.get_path('model.pkl')
         joblib.dump(model, path)
 
         return path
 
-    def model_load(self):
+    def model_load(self) -> XGBClassifier:
         path = self.get_path('model.pkl')
 
         return joblib.load(path)
 
-    def save(self):
+    def save(self) -> Self:
         params = json.dumps({
             k: v for k, v in self.__dict__.items()
             if k not in ['model', 'history', 'results', 'seed', 'verbose', 'path']
@@ -541,7 +642,7 @@ class ChurnXGB(object):
 
         return self
 
-    def load(self):
+    def load(self) -> Self:
         if self.file_exists('params.json'):
             with open(self.get_path('params.json'), 'r') as fh:
                 params = json.load(fh)

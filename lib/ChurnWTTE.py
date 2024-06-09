@@ -9,7 +9,8 @@ import tensorflow as tf
 
 from itertools import groupby
 from operator import itemgetter
-from typing import Optional
+from typing import Literal, Optional
+from typing_extensions import Self
 
 from .utils import get_color
 
@@ -38,7 +39,7 @@ class ChurnWTTE(object):
         # Execution params
         self.seed = seed  # Base random seed
         self.verbose = verbose  # Print progress
-        self.path = path or os.getcwd()  # Path to store model files
+        self.path = self.set_path(path)  # Path to store model files
 
         # Model params
         self.params = {
@@ -83,7 +84,7 @@ class ChurnWTTE(object):
         self.sls = pd.DataFrame()
         self.results = pd.DataFrame()
 
-    def build_model(self):
+    def build_model(self) -> tf.keras.Model:
         if np.isnan(self.mask):
             self.mask = -1.0
         if self.params['nn'] == 0:
@@ -169,7 +170,32 @@ class ChurnWTTE(object):
 
         return loss
 
-    def fit(self, x_train, y_train, x_test, y_test):
+    def loglik_discrete(self, y, u, a, b):
+        epsilon = tf.keras.backend.epsilon()
+
+        hazard0 = tf.keras.backend.pow((y + epsilon) / a, b)
+        hazard1 = tf.keras.backend.pow((y + 1.0) / a, b)
+
+        loglik = u * tf.keras.backend.log(tf.keras.backend.exp(hazard1 - hazard0) - (1.0 - epsilon)) - hazard1
+
+        return loglik
+
+    def loglik_continuous(self, y, u, a, b):
+        epsilon = tf.keras.backend.epsilon()
+
+        ya = (y + epsilon) / a
+
+        loglik = u * (tf.keras.backend.log(b) + b * tf.keras.backend.log(ya)) - tf.keras.backend.pow(ya, b)
+
+        return loglik
+
+    def fit(
+        self,
+        x_train: np.ndarray,
+        y_train: np.ndarray,
+        x_test: np.ndarray,
+        y_test: np.ndarray
+    ) -> Self:
         tf.keras.backend.clear_session()
         tf.keras.backend.set_epsilon(self.params['epsilon'])
         tf.random.set_seed(self.seed)
@@ -215,7 +241,10 @@ class ChurnWTTE(object):
 
         return self
 
-    def predict(self, x):
+    def predict(
+        self,
+        x: np.ndarray
+    ) -> np.ndarray:
         # Load model
         if self.model is None:
             self.load()
@@ -231,7 +260,11 @@ class ChurnWTTE(object):
 
         return y_pred
 
-    def set_results(self, y_pred, y_true=None):
+    def set_results(
+        self,
+        y_pred: np.ndarray,
+        y_true: Optional[np.ndarray] = None
+    ) -> Self:
         if self.sls.empty and y_true is not None:
             self.sls = self.get_seq_lengths(y_true)
 
@@ -244,7 +277,11 @@ class ChurnWTTE(object):
 
         return self
 
-    def build_seq(self, data, deep=False):
+    def build_seq(
+        self,
+        data: pd.DataFrame,
+        deep: bool = False
+    ) -> tuple[np.ndarray, np.ndarray]:
         if len(self.features) == 0:
             self.features = list(data.columns[~data.columns.isin([self.id_col, self.tfs_col, self.tte_col])])
 
@@ -292,7 +329,11 @@ class ChurnWTTE(object):
 
         return x, y
 
-    def rebuild_seq(self, data, use_sls=False):
+    def rebuild_seq(
+        self,
+        data: np.ndarray,
+        use_sls: bool = False
+    ) -> pd.DataFrame:
         data = self.seq_to_df(data, use_sls=use_sls)
         data[self.tfs_col] = data[self.seq_col] + data[self.tfs_col]
 
@@ -307,9 +348,12 @@ class ChurnWTTE(object):
 
         return data
 
-    def input_seq(self, x, y=None):
+    def input_seq(
+        self,
+        x: np.ndarray,
+        y: Optional[np.ndarray] = None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         z = x[..., :3]
-
         x = x[..., 3:]
 
         if np.isnan(self.mask):
@@ -335,7 +379,11 @@ class ChurnWTTE(object):
 
         return x, y, z
 
-    def output_seq(self, y, z):
+    def output_seq(
+        self,
+        y: np.ndarray,
+        z: np.ndarray
+    ) -> np.ndarray:
         n_seq = y.shape[0]
         max_sl = y.shape[1]
 
@@ -346,7 +394,13 @@ class ChurnWTTE(object):
 
         return seq
 
-    def seq_to_df(self, x, y=None, use_sls=False, seq_last=False):
+    def seq_to_df(
+        self,
+        x: np.ndarray,
+        y: Optional[np.ndarray] = None,
+        use_sls: bool = False,
+        seq_last: bool = False
+    ) -> pd.DataFrame:
         n_seq = x.shape[0]
         max_sl = x.shape[1]
         n_feat = len(self.features)
@@ -370,41 +424,35 @@ class ChurnWTTE(object):
 
         return df
 
-    def get_seq_lengths(self, x):
+    def get_seq_lengths(
+        self,
+        x: np.ndarray
+    ) -> pd.DataFrame:
         return pd.DataFrame({
             'id': x[:, 0, 0].astype(int),
             'length': np.sum(np.all(~np.isnan(x), axis=-1), axis=1)
         })
 
-    def loglik_discrete(self, y, u, a, b):
-        epsilon = tf.keras.backend.epsilon()
-
-        hazard0 = tf.keras.backend.pow((y + epsilon) / a, b)
-        hazard1 = tf.keras.backend.pow((y + 1.0) / a, b)
-
-        loglik = u * tf.keras.backend.log(tf.keras.backend.exp(hazard1 - hazard0) - (1.0 - epsilon)) - hazard1
-
-        return loglik
-
-    def loglik_continuous(self, y, u, a, b):
-        epsilon = tf.keras.backend.epsilon()
-
-        ya = (y + epsilon) / a
-
-        loglik = u * (tf.keras.backend.log(b) + b * tf.keras.backend.log(ya)) - tf.keras.backend.pow(ya, b)
-
-        return loglik
-
-    def weibull_percentile(self, y, id=None, p=0.5):
+    def weibull_percentile(
+        self,
+        y: pd.DataFrame,
+        id: Optional[int] = None,
+        p: float = 0.5
+    ) -> np.ndarray:
         if id:
             y = y[y[self.id_col] == id]
 
-        a = y[self.y_col]
-        b = y[self.u_col]
+        a = np.asfarray(y[self.y_col])
+        b = np.asfarray(y[self.u_col])
 
         return a * np.power(-np.log(1.0 - p), 1.0 / b)
 
-    def weibull_pdf(self, y, id=None, t=None):
+    def weibull_pdf(
+        self,
+        y: pd.DataFrame,
+        id: Optional[int] = None,
+        t: Optional[np.ndarray | int] = None
+    ) -> np.ndarray:
         if id:
             y = y[y[self.id_col] == id]
         
@@ -414,12 +462,17 @@ class ChurnWTTE(object):
             t = np.arange(t)
         t = np.asfarray(t)
         
-        a = y[self.y_col]
-        b = y[self.u_col]
+        a = np.asfarray(y[self.y_col])
+        b = np.asfarray(y[self.u_col])
 
         return (b / a) * np.power(t / a, b - 1) * np.exp(-np.power(t / a, b))
 
-    def weibull_cdf(self, y, id=None, t=None):
+    def weibull_cdf(
+        self,
+        y: pd.DataFrame,
+        id: Optional[int] = None,
+        t: Optional[np.ndarray | int] = None
+    ) -> np.ndarray:
         if id:
             y = y[y[self.id_col] == id]
         
@@ -429,12 +482,17 @@ class ChurnWTTE(object):
             t = np.arange(t)
         t = np.asfarray(t)
 
-        a = y[self.y_col]
-        b = y[self.u_col]
+        a = np.asfarray(y[self.y_col])
+        b = np.asfarray(y[self.u_col])
 
         return 1 - np.exp(-np.power(t / a, b))
 
-    def weibull_pmf(self, y, id=None, t=None):
+    def weibull_pmf(
+        self,
+        y: pd.DataFrame,
+        id: Optional[int] = None,
+        t: Optional[np.ndarray | int] = None
+    ) -> np.ndarray:
         if t is None:
             t = np.arange(30)
         elif not isinstance(t, (np.ndarray, list, tuple)):
@@ -443,7 +501,12 @@ class ChurnWTTE(object):
 
         return self.weibull_cdf(y, id=id, t=(t + 1)) - self.weibull_cdf(y, id=id, t=t)
 
-    def weibull_cmf(self, y, id=None, t=None):
+    def weibull_cmf(
+        self,
+        y: pd.DataFrame,
+        id: Optional[int] = None,
+        t: Optional[np.ndarray | int] = None
+    ) -> np.ndarray:
         if t is None:
             t = np.arange(30)
         elif not isinstance(t, (np.ndarray, list, tuple)):
@@ -452,7 +515,11 @@ class ChurnWTTE(object):
 
         return self.weibull_cdf(y, id=id, t=(t + 1))
 
-    def weibull_cmf_bulk(self, y, t=None):
+    def weibull_cmf_bulk(
+        self,
+        y: pd.DataFrame,
+        t: Optional[np.ndarray | int] = None
+    ) -> pd.DataFrame:
         if t is None:
             t = np.arange(30)
         elif not isinstance(t, (np.ndarray, list, tuple)):
@@ -471,7 +538,13 @@ class ChurnWTTE(object):
 
         return cmfs
 
-    def prob_surv(self, y, id=None, loc=-1, t=1):
+    def prob_surv(
+        self,
+        y: pd.DataFrame,
+        id: Optional[int] = None,
+        loc: int = -1,
+        t: int = 1
+    ) -> np.ndarray:
         if id:
             y = y[y[self.id_col] == id].iloc[loc]
 
@@ -479,7 +552,11 @@ class ChurnWTTE(object):
 
         return cmf[t - 1]
 
-    def bulk_prob_surv(self, y, t=1):
+    def bulk_prob_surv(
+        self,
+        y: pd.DataFrame,
+        t: int = 1
+    ) -> pd.Series:
         cmfs = self.weibull_cmf_bulk(y, t=t)
 
         y = cmfs.loc[:, t - 1]
@@ -487,7 +564,10 @@ class ChurnWTTE(object):
 
         return y
 
-    def bulk_true_surv(self, y):
+    def bulk_true_surv(
+        self,
+        y: pd.DataFrame
+    ) -> pd.Series:
         y = y.sort_values(self.tfs_col).groupby(self.id_col).last().reset_index()
         y[self.tte_col] = [1 if i in [0., 1.] else 0 for i in y[self.tte_col]]
         y = y.set_index(self.id_col).rename_axis(None)[self.tte_col]
@@ -495,7 +575,16 @@ class ChurnWTTE(object):
 
         return y
 
-    def plot_params_dist(self, y, loc=None, xmax=None, s=20, ax=None, show=True, file=None):
+    def plot_params_dist(
+        self,
+        y: pd.DataFrame,
+        loc: Optional[int] = None,
+        xmax: Optional[int] = None,
+        s: int = 20,
+        ax: Optional[plt.Axes] = None,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
         if loc:
             y = y.sort_values(self.tfs_col).groupby(self.id_col).nth(loc).reset_index()
 
@@ -516,7 +605,14 @@ class ChurnWTTE(object):
 
         self.plot_figure(fig=fig, show=show, file=file)
 
-    def plot_single_params(self, y, id=None, ax=None, show=True, file=None):
+    def plot_single_params(
+        self,
+        y: pd.DataFrame,
+        id: Optional[int] = None,
+        ax: Optional[plt.Axes] = None,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
         if id:
             y = y[y[self.id_col] == id]
 
@@ -543,7 +639,17 @@ class ChurnWTTE(object):
 
         self.plot_figure(fig=fig, show=show, file=file)
 
-    def plot_weibull(self, y, kind=None, id=None, loc=-1, t=30, ax=None, show=True, file=None):
+    def plot_weibull(
+        self,
+        y: pd.DataFrame,
+        kind: Literal['continuous', 'discrete'] = None,
+        id: Optional[int] = None,
+        loc: int = -1,
+        t: int = 30,
+        ax: Optional[plt.Axes] = None,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
         kind = kind or self.params['kind']
 
         y = y.sort_values(self.tfs_col).groupby(self.id_col).nth(loc).reset_index()
@@ -557,7 +663,7 @@ class ChurnWTTE(object):
             p = self.weibull_pdf(y, t=t)
             c = self.weibull_cdf(y, t=t)
 
-        x = np.array(range(len(p)))
+        x = np.arange(len(p))
 
         if ax is None:
             fig, ax = plt.subplots(figsize=(16, 8))
@@ -580,7 +686,12 @@ class ChurnWTTE(object):
 
         self.plot_figure(fig=fig, show=show, file=file)
 
-    def plot_history_eval(self, ax=None, show=True, file=None):
+    def plot_history_eval(
+        self,
+        ax: Optional[plt.Axes] = None,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
         if self.history.empty:
             return
         
@@ -620,14 +731,13 @@ class ChurnWTTE(object):
         ax.set_title('epochs')
 
         self.plot_figure(fig=fig, show=show, file=file)
-
-    def print_model_summary(self):
-        if self.model is not None:
-            self.model.summary()
-        else:
-            self.build_model().summary()
     
-    def plot_figure(self, fig=None, show=True, file=None):
+    def plot_figure(
+        self,
+        fig: plt.Figure = None,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
         if fig is not None:
             if show:
                 plt.show()
@@ -640,11 +750,23 @@ class ChurnWTTE(object):
             plt.clf()
             plt.close('all')
 
-    def get_path(self, name: str) -> str:
-        if not os.path.exists('{}/{}'.format(os.getcwd(), self.path)):
-            os.makedirs('{}/{}'.format(os.getcwd(), self.path))
+    def print_model_summary(self, **kwargs):
+        model = self.model or self.build_model()
+        model.summary(**kwargs)
+    
+    def set_path(self, path: str) -> str:
+        if not path:
+            path = os.getcwd()
+        elif not path.startswith('/'):
+            path = f'{os.getcwd()}/{path}'
 
-        return '{}/{}/{}'.format(os.getcwd(), self.path, name)
+        if not os.path.exists(path):
+            os.makedirs(path)
+        
+        return path
+
+    def get_path(self, name: str) -> str:
+        return f'{self.path}/{name}'
 
     def file_exists(self, name: str) -> bool:
         return os.path.isfile(self.get_path(name))
@@ -652,20 +774,20 @@ class ChurnWTTE(object):
     def model_exists(self) -> bool:
         return self.file_exists('weights.h5')
 
-    def model_save(self, model):
+    def model_save(self, model: tf.keras.Model) -> str:
         path = self.get_path('weights.h5')
         model.save_weights(path)
 
         return path
 
-    def model_load(self):
+    def model_load(self) -> tf.keras.Model:
         path = self.get_path('weights.h5')
         model = self.build_model()
         model.load_weights(path)
 
         return model
 
-    def save(self):
+    def save(self) -> Self:
         params = json.dumps({
             k: v for k, v in self.__dict__.items()
             if k not in [
@@ -698,7 +820,7 @@ class ChurnWTTE(object):
 
         return self
 
-    def load(self):
+    def load(self) -> Self:
         if self.file_exists('params.json'):
             with open(self.get_path('params.json'), 'r') as fh:
                 params = json.load(fh)
