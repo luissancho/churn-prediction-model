@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from typing import Optional
+from typing import Any, Optional
 
 
 # Colors name -> hex mapping
@@ -74,6 +74,25 @@ def show_summary(
         for v, t in values.items():
             r = 100 * t / values.sum()
             print('    {}: {:,} ({:0.2f}%)'.format(v, t, r))
+
+
+def is_array(
+    x: Any
+) -> bool:
+    """
+    Check if a variable is an array-type or any kind of sequence.
+
+    Parameters
+    ----------
+    x : Any
+        Variable to check.
+    
+    Returns
+    -------
+    bool
+        True if the variable is an array-type, False otherwise.
+    """
+    return isinstance(x, (list, tuple)) or (hasattr(x, '__array__') and hasattr(x, '__iter__'))
 
 
 def format_number(
@@ -166,7 +185,7 @@ def get_ewma_alpha(
     elif halflife is not None:
         return 1 - 0.5 ** (1 / halflife)
     else:
-        raise ValueError('One of com, span or halflife must be provided.')
+        raise ValueError('One of [com], [span] or [halflife] must be provided.')
 
 def ewma(
     x: np.ndarray,
