@@ -1,7 +1,9 @@
 import joblib
 import json
-import math
+import keras
+from keras import ops as K
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import numpy as np
 import os
 import pandas as pd
@@ -33,14 +35,18 @@ class WTTE(object):
     features : list[str], optional
         List of feature names to be used in the model.
         If None, all columns except keys ('id', 'tfs' and 'tte') will be used.
-    kind : Literal['discrete', 'continuous'], optional
-        Weibull distribution kind.
-    max_sl : int, optional
-        Maximum sequence length.
-        If 0, the maximum sequence length will be set to the maximum sequence length from data.
     min_tte : int, optional
         Minimum time to event for binary classification (positive if `tte` <= `min_tte`).
         Defaults to 1 (churn if customer churns in the current period or the next).
+    max_sl : int, optional
+        Maximum sequence length.
+        If 0, the maximum sequence length will be set to the maximum sequence length from data.
+    kind : Literal['discrete', 'continuous'], optional
+        Weibull distribution kind.
+    wlevel : Literal['epoch', 'batch'], optional
+        Level to save the weights and bias.
+        If 'epoch', the weights and bias are saved after each epoch.
+        If 'batch', the weights and bias are saved after each batch.
     seed : int, optional
         Base random seed for reproducibility.
     verbose : int, optional
@@ -57,9 +63,10 @@ class WTTE(object):
     def __init__(
         self,
         features: Optional[list[str]] = None,
-        kind: Literal['discrete', 'continuous'] = 'discrete',
-        max_sl: int = 0,
         min_tte: int = 1,
+        max_sl: int = 0,
+        kind: Literal['discrete', 'continuous'] = 'discrete',
+        wlevel: Literal['epoch', 'batch'] = 'epoch',
         seed: int = 42,
         verbose: int = 0,
         path: Optional[str] = None,
@@ -77,9 +84,10 @@ class WTTE(object):
 
         # Execution params
         self.features = features or []
-        self.kind = kind
-        self.max_sl = max_sl
         self.min_tte = min_tte
+        self.max_sl = max_sl
+        self.kind = kind
+        self.wlevel = wlevel
         self.seed = seed
         self.verbose = verbose
         self.path = self.set_path(path)
@@ -98,8 +106,7 @@ class WTTE(object):
             'weight_l2': kwargs.get('weight_l2', 1e-5),  # L2 regularization penalty (0 = no L2 regularization)
             'init_alpha': kwargs.get('init_alpha', None),  # Initialize alpha value (None = compute from data)
             'max_beta': kwargs.get('max_beta', 2.),  # Maximum beta value (used to regularize beta values)
-            'epsilon': kwargs.get('epsilon', 1e-8),  # Epsilon value to avoid numerical instability
-            'shuffle': kwargs.get('shuffle', False)  # Shuffle data before each epoch
+            'epsilon': kwargs.get('epsilon', 1e-8)  # Epsilon value to avoid numerical instability
         }
 
         # Model instance
@@ -113,7 +120,9 @@ class WTTE(object):
         # Model params
         self.mask = np.NaN  # Mask value
         self.a_mean = np.NaN  # Mean of alpha values
+        self.a_std = np.NaN  # Standard deviation of alpha values
         self.b_mean = np.NaN  # Mean of beta values
+        self.b_std = np.NaN  # Standard deviation of beta values
         self.init_alpha = np.NaN  # Initial alpha value
         self.max_beta = np.NaN  # Maximum beta value
 
@@ -121,15 +130,15 @@ class WTTE(object):
         self.history = pd.DataFrame()  # Training history
         self.sls = pd.DataFrame()  # Customer sequence lengths
         self.results = pd.DataFrame()  # Predicted results
-        self.weightwatcher = None  # Weight watcher
+        self.watcher = None  # Weights watcher object
 
-    def build_model(self) -> tf.keras.Model:
+    def build_model(self) -> keras.Model:
         """
         Build the model architecture.
 
         Returns
         -------
-        model : tf.keras.Model
+        model : keras.Model
             Model architecture.
         """
         if np.isnan(self.mask):
@@ -139,16 +148,16 @@ class WTTE(object):
 
         regularizer = None
         if self.params['weight_l1'] > 0 and self.params['weight_l2'] > 0:
-            regularizer = tf.keras.regularizers.l1_l2(l1=self.params['weight_l1'], l2=self.params['weight_l2'])
+            regularizer = keras.regularizers.l1_l2(l1=self.params['weight_l1'], l2=self.params['weight_l2'])
         elif self.params['weight_l1'] > 0:
-            regularizer = tf.keras.regularizers.l1(self.params['weight_l1'])
+            regularizer = keras.regularizers.l1(self.params['weight_l1'])
         elif self.params['weight_l2'] > 0:
-            regularizer = tf.keras.regularizers.l2(self.params['weight_l2'])
+            regularizer = keras.regularizers.l2(self.params['weight_l2'])
 
-        model = tf.keras.models.Sequential()
+        model = keras.models.Sequential()
 
         model.add(
-            tf.keras.layers.Masking(
+            keras.layers.Masking(
                 mask_value=self.mask,
                 input_shape=(None, len(self.features))
             )
@@ -156,7 +165,7 @@ class WTTE(object):
 
         for _ in np.arange(self.params['hl']):
             model.add(
-                tf.keras.layers.LSTM(
+                keras.layers.LSTM(
                     self.params['nn'],
                     activation='tanh',
                     dropout=self.params['dropout'],
@@ -167,26 +176,24 @@ class WTTE(object):
                 )
             )
             model.add(
-                tf.keras.layers.BatchNormalization(
+                keras.layers.BatchNormalization(
                     gamma_regularizer=regularizer,
                     beta_regularizer=regularizer
                 )
             )
 
         model.add(
-            tf.keras.layers.TimeDistributed(
-                tf.keras.layers.Dense(2)
-            )
+            keras.layers.Dense(2)
         )
         model.add(
-            tf.keras.layers.Activation(self.activation)
+            keras.layers.Activation(self.activation)
         )
 
         model.compile(
             loss=self.loss,
-            optimizer=tf.keras.optimizers.Adam(
+            optimizer=keras.optimizers.Adam(
                 learning_rate=self.params['lr'],
-                clipnorm=1
+                clipnorm=1.
             )
         )
 
@@ -238,22 +245,22 @@ class WTTE(object):
         tf.Tensor
             Output tensor with activation function applied.
         """
-        eps = tf.keras.backend.epsilon()
+        epsilon = keras.config.epsilon()
 
         # Unstack tensor
         a = ab[..., 0]  # Alpha values
         b = ab[..., 1]  # Beta values
 
         # Exponential activation for alpha
-        a = self.init_alpha * tf.keras.backend.exp(a)
+        a = self.init_alpha * K.exp(a)
 
         # Sigmoid activation for beta
         if self.max_beta > 1:
-            b = b - tf.keras.backend.log(self.max_beta - 1.)
-        b = self.max_beta * tf.keras.backend.clip(tf.keras.backend.sigmoid(b), eps, 1. - eps)
+            b = b - K.log(self.max_beta - 1.)
+        b = self.max_beta * K.clip(K.sigmoid(b), epsilon, 1. - epsilon)
 
         # Restack tensor
-        x = tf.keras.backend.stack([a, b], axis=-1)
+        x = K.stack([a, b], axis=-1)
 
         return x
 
@@ -293,7 +300,7 @@ class WTTE(object):
         tf.Tensor
             Loss value.
         """
-        eps = tf.keras.backend.epsilon()
+        epsilon = keras.config.epsilon()
 
         # Unstack tensors
         a_true = y_true[..., 0]
@@ -307,9 +314,9 @@ class WTTE(object):
             loglik = self.loglik_continuous(a_true, b_true, a_pred, b_pred)
 
         # Clip values to avoid numerical instability
-        loglik = tf.keras.backend.clip(loglik, math.log(eps), math.log(1. - eps))
+        loglik = K.clip(loglik, K.log(epsilon), K.log(1. - epsilon))
 
-        return -tf.reduce_mean(loglik)
+        return -K.mean(loglik)
 
     def loglik_continuous(
         self,
@@ -354,16 +361,16 @@ class WTTE(object):
         tf.Tensor
             Log-likelihood values.
         """
-        eps = tf.keras.backend.epsilon()
+        epsilon = keras.config.epsilon()
 
         # Compute (t/alpha)
         # Add a small number (epsilon) to avoid numerical instability
-        ytp = (a_true + eps) / a_pred
+        ytp = (a_true + epsilon) / a_pred
 
         # Weibull log-likelihood
         loglik = b_true * (
-            b_pred * tf.keras.backend.log(ytp) + tf.keras.backend.log(b_pred)
-        ) - tf.keras.backend.pow(ytp, b_pred)
+            b_pred * K.log(ytp) + K.log(b_pred)
+        ) - K.power(ytp, b_pred)
 
         return loglik
 
@@ -410,16 +417,16 @@ class WTTE(object):
         tf.Tensor
             Log-likelihood values.
         """
-        eps = tf.keras.backend.epsilon()
+        epsilon = keras.config.epsilon()
 
         # Compute Weibull CHF for t and t+1
         # Add a small number (epsilon) to avoid numerical instability
-        chf0 = tf.keras.backend.pow((a_true + eps) / a_pred, b_pred)
-        chf1 = tf.keras.backend.pow((a_true + 1.) / a_pred, b_pred)
+        chf0 = K.power((a_true + epsilon) / a_pred, b_pred)
+        chf1 = K.power((a_true + 1.) / a_pred, b_pred)
 
         # Weibull log-likelihood
-        loglik = b_true * tf.keras.backend.log(
-            tf.keras.backend.exp(chf1 - chf0) - 1.
+        loglik = b_true * K.log(
+            K.exp(chf1 - chf0) - 1.
         ) - chf1
 
         return loglik
@@ -444,7 +451,9 @@ class WTTE(object):
 
         self.mask = np.nanmin(x) - 1
         self.a_mean = np.nanmean(y[..., 0])
+        self.a_std = np.nanstd(y[..., 0])
         self.b_mean = np.nanmean(y[..., 1])
+        self.b_std = np.nanstd(y[..., 1])
 
         # If `init_alpha` is not provided, use actual data to compute it
         if self.params['init_alpha'] is not None:
@@ -491,8 +500,8 @@ class WTTE(object):
         y_test : np.ndarray
             Validation target sequences.
         """
-        tf.keras.backend.clear_session()
-        tf.keras.backend.set_epsilon(self.params['epsilon'])
+        keras.backend.clear_session()
+        keras.config.set_epsilon(self.params['epsilon'])
         tf.random.set_seed(self.seed)
         
         # Initialize model
@@ -502,27 +511,27 @@ class WTTE(object):
         x_train, y_train, _ = self.input_seq(x_train, y_train)
         x_test, y_test, _ = self.input_seq(x_test, y_test)
 
-        nant = tf.keras.callbacks.TerminateOnNaN()
+        nant = keras.callbacks.TerminateOnNaN()
         callbacks = [nant]
 
         # Set learning rate decay
         if self.params['lr_decay'] > 0:
-            red_lr = tf.keras.callbacks.ReduceLROnPlateau(
+            lr_decay = keras.callbacks.ReduceLROnPlateau(
                 monitor='val_loss',
                 patience=self.params['lr_decay'],
                 factor=0.1,
                 min_lr=self.params['lr'] * 0.01,
                 verbose=self.verbose
             )
-            callbacks.append(red_lr)
+            callbacks.append(lr_decay)
 
         # Set early stopping
         if self.params['stop'] > 0:
-            estop = tf.keras.callbacks.EarlyStopping(patience=self.params['stop'])
-            callbacks.append(estop)
-        
-        weightwatcher = WeightWatcher()
-        callbacks.append(weightwatcher)
+            stop = keras.callbacks.EarlyStopping(patience=self.params['stop'])
+            callbacks.append(stop)
+
+        watcher = WeightWatcher(level=self.wlevel)
+        callbacks.append(watcher)
 
         # Fit model
         h = self.model.fit(
@@ -530,14 +539,17 @@ class WTTE(object):
             epochs=self.params['epochs'],
             batch_size=self.params['batch'],
             validation_data=(x_test, y_test),
-            shuffle=self.params['shuffle'],
+            shuffle=False,
             verbose=self.verbose,
             callbacks=callbacks
         )
 
         # Set training history
         self.history = pd.DataFrame.from_dict(h.history, dtype='float')
-        self.weightwatcher = weightwatcher
+        self.watcher = watcher
+
+        if self.history.dropna().empty:
+            raise ValueError('Fit failed.')
 
         return self
 
@@ -947,6 +959,44 @@ class WTTE(object):
             'id': x[:, 0, 0].astype(int),
             'length': np.sum(np.all(~np.isnan(x), axis=-1), axis=1)
         })
+    
+    def pad_seq(
+        self,
+        data: pd.DataFrame,
+        factorize: bool = True
+    ) -> pd.DataFrame:
+        """
+        Pad the given sequences to the beggining of each customer's lifetime.
+        Optionally, factorize customer IDs to get an increasing length shape (triangular).
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Input DataFrame.
+        factorize : bool, default True
+            If True, sort sequences by length and factorize customer IDs.
+
+        Returns
+        -------
+        pd.DataFrame
+            Padded DataFrame.
+        """
+        df = data[[
+            self.id_col, self.tfs_col, self.wa_col, self.wb_col
+        ]].sort_values([self.id_col, self.tfs_col], ignore_index=True)
+
+        df[self.tfs_col] = df.groupby(self.id_col)[self.tfs_col].apply(lambda x: x - x.min()).explode().values
+
+        if factorize:
+            df['slen'] = df[self.id_col].map(df.groupby(self.id_col)[self.tfs_col].max())
+            df = df.sort_values(['slen', self.id_col, self.tfs_col], ascending=[False, True, True], ignore_index=True)
+            df[self.id_col] = pd.factorize(df[self.id_col])[0]
+
+        df = df.sort_values([self.id_col, self.tfs_col])[[
+            self.id_col, self.tfs_col, self.wa_col, self.wb_col
+        ]]
+
+        return df
 
     def weibull_percentile(
         self,
@@ -1230,8 +1280,7 @@ class WTTE(object):
         file: Optional[str] = None
     ):
         """
-        Plot the distribution of the Weibull alpha and beta parameters
-        for all customers in the given data.
+        Plot the distribution of Weibull alpha and beta parameters.
 
         Parameters
         ----------
@@ -1277,15 +1326,82 @@ class WTTE(object):
             xmax = sx.max()
         ax.set_xlim((0, xmax))
         ax.set_xticks(np.arange(0, xmax + 10, 10))
-        ax.set_xlabel('Alpha')
+        ax.set_xlabel('alpha')
 
         if not ymax:
             ymax = sy.max()
         ax.set_ylim((0, ymax))
         ax.set_yticks(np.arange(0, ymax + 0.5, 0.5))
-        ax.set_ylabel('Beta')
+        ax.set_ylabel('beta')
 
-        ax.set_title('Alpha and Beta Params Distribution')
+        ax.set_title('Weibull Params')
+
+        self.plot_figure(fig=fig, show=show, file=file)
+
+    def plot_params_seq(
+        self,
+        y: Optional[pd.DataFrame] = None,
+        factorize: bool = True,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
+        """
+        Plot each customer Weibull alpha and beta parameters over time, showing how the parameters
+        change from one period to the next as the customer info and usage change.
+
+        In this plot, each line represents a customer and each column represents a period,
+        so the plot is a sequence of customers over time.
+
+        - Alpha: the risk of a customer churning, hotter colors represent lower TTEs,
+        which means the customer is more likely to churn soon.
+        In a well fitted model, colors shoud be hotter near the end of each sequence.
+
+        - Beta: the level of certainty of predictions, greener colors represent higher certainty,
+        which means the model is more certain about the customer's predicted TTE.
+        In a well fitted model, colors shoud be greener for customers with many periods recorded.
+
+        Parameters
+        ----------
+        y : pd.DataFrame, optional
+            Input data.
+            If not provided, the `results` dataframe will be used.
+        factorize : bool, optional
+            If True, sort sequences by length and factorize customer IDs,
+            so that we get an increasing length shape (triangular).
+        show : bool, optional
+            If True, the figure will be displayed.
+        file : str, optional
+            If provided, the figure will be saved to a file.
+        """
+        if y is None:
+            y = self.results.copy()
+
+        df = self.pad_seq(y, factorize=factorize)
+
+        x = np.arange(df[self.tfs_col].max() + 1)
+        y = np.arange(df[self.id_col].max() + 1)
+        wa = pd.pivot_table(df, index=self.id_col, columns=self.tfs_col, values=self.wa_col)
+        wb = pd.pivot_table(df, index=self.id_col, columns=self.tfs_col, values=self.wb_col)
+
+        fig, axs = plt.subplots(nrows=1, ncols=2, figsize=(16, 8), constrained_layout=True)
+        axs = axs.flatten()
+
+        a_norm = mcolors.TwoSlopeNorm(vcenter=self.a_mean, vmin=0, vmax=self.max_sl)
+        axs[0].pcolormesh(x, y, wa, norm=a_norm, cmap='hot')
+        axs[0].set_title('alpha')
+
+        b_norm = mcolors.TwoSlopeNorm(vcenter=self.b_mean, vmin=0, vmax=self.max_beta)
+        axs[1].pcolormesh(x, y, wb, norm=b_norm, cmap='Spectral')
+        axs[1].set_title('beta')
+
+        for ax in axs:
+            ax.set_xlim((0, np.max(x)))
+            ax.set_ylim((0, np.max(y)))
+
+            ax.set_xlabel('time')
+            ax.set_ylabel('sequence')
+
+        plt.suptitle('Weibull Sequences', y=1.03)
 
         self.plot_figure(fig=fig, show=show, file=file)
 
@@ -1328,11 +1444,11 @@ class WTTE(object):
         ax2 = ax.twinx()
 
         ax.plot(x, y[self.wa_col], color=get_color('blue'))
-        ax.set_xlabel('Time')
-        ax.set_ylabel('Alpha')
+        ax.set_xlabel('time')
+        ax.set_ylabel('alpha')
 
         ax2.plot(x, y[self.wb_col], color=get_color('red'))
-        ax2.set_ylabel('Beta')
+        ax2.set_ylabel('beta')
 
         for t in ax.get_yticklabels():
             t.set_color(get_color('blue'))
@@ -1408,7 +1524,7 @@ class WTTE(object):
         ax2 = ax.twinx()
 
         ax.plot(x, p, color=get_color('blue'))
-        ax.set_xlabel('Time')
+        ax.set_xlabel('time')
         ax.set_ylabel('P{}F'.format(kind[0].upper()))
 
         ax2.plot(x, c, color=get_color('red'))
@@ -1445,8 +1561,8 @@ class WTTE(object):
             return
 
         columns = ['loss', 'val_loss']
-        if 'lr' in self.history.columns:
-            columns.append('lr')
+        if 'learning_rate' in self.history.columns:
+            columns.append('learning_rate')
 
         df = self.history[columns]
 
@@ -1456,28 +1572,93 @@ class WTTE(object):
             fig = None
 
         ax.plot(
-            df.index, df['loss'].values, color=get_color('blue'), label='training loss'
+            df.index, df['loss'].values, color=get_color('blue'), label='loss'
         )
         ax.plot(
-            df.index, df['val_loss'].values, color=get_color('orange'), label='validation loss'
+            df.index, df['val_loss'].values, color=get_color('orange'), label='val_loss'
         )
 
-        ax.set_xticks(np.arange(0, len(df) + 5, 5))
-        ax.legend(loc='upper left')
+        if 'learning_rate' in self.history.columns:
+            lr = self.params['lr']
 
-        if 'lr' in self.history.columns:
-            model_lr = self.params['lr']
             ax2 = ax.twinx()
             ax2.plot(
-                df.index, df['lr'].values, color=get_color('grey'), ls='--', lw=2, alpha=0.2, label=f'learning rate ({model_lr:.0e})'
+                df.index, df['learning_rate'].values,
+                color=get_color('grey'), ls='--', lw=2, alpha=0.2,
+                label=f'learning rate ({lr:.0e})'
             )
 
-            ax2.set_ylim((model_lr * 0.001, model_lr * 10))
+            ax2.set_ylim((lr * 0.001, lr * 10))
             ax2.set_yscale('log')
             ax2.yaxis.set_tick_params(which='minor', length=0)
             ax2.legend(loc='upper right')
 
-        ax.set_title('epochs')
+        ax.legend(loc='upper left')
+        ax.set_title('loss')
+
+        self.plot_figure(fig=fig, show=show, file=file)
+
+    def plot_weights(
+        self,
+        show: bool = True,
+        file: Optional[str] = None
+    ):
+        """
+        Plot the bias and weights of the model over time,
+        showing how the model's bias and weights change as the model learns.
+
+        Parameters
+        ----------
+        show : bool, optional
+            If True, the figure will be displayed.
+        file : str, optional
+            If provided, the figure will be saved to a file.
+        """
+        b = self.watcher.bias[:, -1]
+        w = self.watcher.weights[:, -1]
+        w_mean = w.mean(axis=1)
+        w_min = w.min(axis=1)
+        w_max = w.max(axis=1)
+        x = np.arange(w.shape[0])
+
+        fig, axs = plt.subplots(nrows=1, ncols=2, figsize=(16, 5), constrained_layout=True)
+        axs = axs.flatten()
+
+        bax = axs[0]
+        bax2 = bax.twinx()
+
+        bax.plot(x, b[:, 0], color=get_color('blue'))
+        bax.set_ylabel('alpha')
+
+        bax2.plot(x, b[:, 1], color=get_color('red'))
+        bax2.set_ylabel('beta')
+
+        for t in bax.get_yticklabels():
+            t.set_color(get_color('blue'))
+        for t in bax2.get_yticklabels():
+            t.set_color(get_color('red'))
+
+        bax.set_title('bias')
+
+        wax = axs[1]
+        wax2 = wax.twinx()
+
+        wax.plot(x, w_mean[:, 0], color=get_color('blue'))
+        wax.plot(x, w_min[:, 0], color=get_color('blue'), linestyle='--')
+        wax.plot(x, w_max[:, 0], color=get_color('blue'), linestyle='--')
+        wax.set_ylabel('alpha')
+
+        wax2.plot(x, w_mean[:, 1], color=get_color('red'))
+        wax2.plot(x, w_min[:, 1], color=get_color('red'), linestyle='--')
+        wax2.plot(x, w_max[:, 1], color=get_color('red'), linestyle='--')
+        wax2.set_ylabel('beta')
+
+        for t in wax.get_yticklabels():
+            t.set_color(get_color('blue'))
+        for t in wax2.get_yticklabels():
+            t.set_color(get_color('red'))
+
+        wax.set_title('weights')
 
         self.plot_figure(fig=fig, show=show, file=file)
 
@@ -1571,13 +1752,13 @@ class WTTE(object):
         """
         Check if the model exists.
         """
-        return self.file_exists('weights.h5')
+        return self.file_exists('wtte.weights.h5')
 
     def save_model(self) -> str:
         """
         Save the model to a file.
         """
-        path = self.get_path('weights.h5')
+        path = self.get_path('wtte.weights.h5')
         self.model.save_weights(path)
 
         return path
@@ -1586,9 +1767,29 @@ class WTTE(object):
         """
         Load the model from a file.
         """
-        path = self.get_path('weights.h5')
+        path = self.get_path('wtte.weights.h5')
         self.model = self.build_model()
         self.model.load_weights(path)
+
+        return self
+
+    def watcher_exists(self) -> bool:
+        """
+        Check if the watcher exists.
+        """
+        return self.file_exists('watcher-weights.npy')
+    
+    def save_watcher(self) -> Self:
+        np.save(self.get_path('watcher-weights.npy'), self.watcher.weights)
+        np.save(self.get_path('watcher-bias.npy'), self.watcher.bias)
+
+        return self
+
+    def load_watcher(self) -> Self:
+        weights = np.load(self.get_path('watcher-weights.npy'))
+        bias = np.load(self.get_path('watcher-bias.npy'))
+
+        self.watcher = WeightWatcher(level=self.wlevel).set_weights(weights, bias)
 
         return self
     
@@ -1599,7 +1800,8 @@ class WTTE(object):
         return {
             k: v for k, v in self.__dict__.items()
             if k not in [
-                'model', 'params', 'history', 'sls', 'results',
+                'model', 'params', 'history',
+                'sls', 'results', 'watcher',
                 'encoder', 'scaler', 'imputer',
                 'seed', 'verbose', 'path'
             ]
@@ -1619,6 +1821,9 @@ class WTTE(object):
 
         if self.model is not None:
             self.save_model()
+        
+        if self.watcher is not None:
+            self.save_watcher()
 
         if self.history is not None:
             self.history.to_json(self.get_path('history.json'), double_precision=10)
@@ -1657,6 +1862,9 @@ class WTTE(object):
 
         if self.model_exists():
             self.load_model()
+        
+        if self.watcher_exists():
+            self.load_watcher()
 
         if self.file_exists('history.json'):
             self.history = pd.read_json(self.get_path('history.json'))
@@ -1676,123 +1884,71 @@ class WTTE(object):
         return self
 
 
-class WeightWatcher(tf.keras.callbacks.Callback):
+class WeightWatcher(keras.callbacks.Callback):
     """
     Keras Callback to keep an eye on output layer weights.
 
-    Usage:
-        weightwatcher = WeightWatcher(per_batch=True,per_epoch=False)
-        model.fit(...,callbacks=[weightwatcher])
-        weightwatcher.plot()
+    Parameters
+    ----------
+    level : Literal['epoch', 'batch'], optional
+        Level to save the weights and bias.
+        If 'epoch', the weights and bias are saved after each epoch.
+        If 'batch', the weights and bias are saved after each batch.
     """
 
     def __init__(
         self,
-        per_batch: bool = False,
-        per_epoch: bool = True
+        level: Literal['epoch', 'batch'] = 'epoch'
     ):
-        self.per_batch = per_batch
-        self.per_epoch = per_epoch
+        self.level = level
 
-    def on_train_begin(self, logs={}):
-        self.a_weights_mean = []
-        self.b_weights_mean = []
-        self.a_weights_min = []
-        self.b_weights_min = []
-        self.a_weights_max = []
-        self.b_weights_max = []
-        self.a_bias = []
-        self.b_bias = []
+        self.epoch = 0
+        self.batch = 0
 
-    def append_metrics(self):
-        # Last two weightlayers in model
-        output_weights, output_biases = self.model.get_weights()[-2:]
+        self.weights = None
+        self.bias = None
+    
+    def on_train_begin(self, logs=None):
+        epochs = self.params['epochs']
+        steps = self.params['steps'] if self.level == 'batch' else 1
+        seqlen = self.model.layers[-3].output.shape[-1]
+        output = self.model.layers[-1].output.shape[-1]
+        
+        self.weights = np.full((epochs, steps, seqlen, output), np.NaN)
+        self.bias = np.full((epochs, steps, output), np.NaN)
 
-        a_weights_mean, b_weights_mean = output_weights.mean(axis=0)
-        a_weights_min, b_weights_min = output_weights.min(axis=0)
-        a_weights_max, b_weights_max = output_weights.max(axis=0)
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch = epoch
+    
+    def on_batch_begin(self, batch, logs=None):
+        if self.level == 'batch':
+            self.batch = batch
 
-        a_bias, b_bias = output_biases
+    def on_batch_end(self, batch, logs=None):
+        if self.level == 'batch':
+            self.add_weights()
 
-        self.a_weights_mean.append(a_weights_mean)
-        self.b_weights_mean.append(b_weights_mean)
-        self.a_weights_min.append(a_weights_min)
-        self.b_weights_min.append(b_weights_min)
-        self.a_weights_max.append(a_weights_max)
-        self.b_weights_max.append(b_weights_max)
-        self.a_bias.append(a_bias)
-        self.b_bias.append(b_bias)
+    def on_epoch_end(self, epoch, logs=None):
+        if self.level == 'epoch':
+            self.add_weights()
 
-    def on_train_end(self, logs={}):
-        if self.per_epoch:
-            self.append_metrics()
+    def on_train_end(self, logs=None):
+        self.weights = self.weights[:self.epoch + 1]
+        self.bias = self.bias[:self.epoch + 1]
+    
+    def add_weights(self):
+        weights, bias = self.model.get_weights()[-2:]
 
-    def on_epoch_begin(self, epoch, logs={}):
-        if self.per_epoch:
-            self.append_metrics()
+        self.weights[self.epoch, self.batch] = weights
+        self.bias[self.epoch, self.batch] = bias
+    
+    def set_weights(self, weights: np.ndarray, bias: np.ndarray) -> Self:
+        self.weights = weights
+        self.bias = bias
 
-    def on_epoch_end(self, epoch, logs={}):
-        if self.per_epoch:
-            self.append_metrics()
+        # Infer watcher params from saved arrays
+        self.level = 'batch' if self.weights.shape[1] > 1 else 'epoch'
+        self.epoch = self.weights.shape[0] - 1
+        self.batch = self.weights.shape[1] - 1
 
-    def on_batch_begin(self, batch, logs={}):
-        if self.per_batch:
-            self.append_metrics()
-
-    def on_batch_end(self, batch, logs={}):
-        if self.per_batch:
-            self.append_metrics()
-
-    def plot(self):
-        import matplotlib.pyplot as plt
-
-        # Create axes
-        fig, ax1 = plt.subplots()
-        ax2 = ax1.twinx()
-
-        ax1.plot(self.a_bias, color='b')
-        ax1.set_xlabel('step')
-        ax1.set_ylabel('alpha')
-
-        ax2.plot(self.b_bias, color='r')
-        ax2.set_ylabel('beta')
-
-        # Change color of each axis
-        def color_y_axis(ax, color):
-            """Color your axes."""
-            for t in ax.get_yticklabels():
-                t.set_color(color)
-            return None
-
-        plt.title('biases')
-        color_y_axis(ax1, 'b')
-        color_y_axis(ax2, 'r')
-        plt.show()
-
-        ###############
-        fig, ax1 = plt.subplots()
-        ax2 = ax1.twinx()
-
-        ax1.plot(self.a_weights_min, color='blue', linestyle='dotted', label='min', linewidth=2)
-        ax1.plot(self.a_weights_mean, color='blue', linestyle='solid', label='mean', linewidth=1)
-        ax1.plot(self.a_weights_max, color='blue', linestyle='dotted', label='max', linewidth=2)
-
-        ax1.set_xlabel('step')
-        ax1.set_ylabel('alpha')
-
-        ax2.plot(self.b_weights_min, color='red', linestyle='dotted', linewidth=2)
-        ax2.plot(self.b_weights_mean, color='red', linestyle='solid', linewidth=1)
-        ax2.plot(self.b_weights_max, color='red', linestyle='dotted', linewidth=2)
-        ax2.set_ylabel('beta')
-
-        # Change color of each axis
-        def color_y_axis(ax, color):
-            """Color your axes."""
-            for t in ax.get_yticklabels():
-                t.set_color(color)
-            return None
-
-        plt.title('weights (min,mean,max)')
-        color_y_axis(ax1, 'b')
-        color_y_axis(ax2, 'r')
-        plt.show()
+        return self

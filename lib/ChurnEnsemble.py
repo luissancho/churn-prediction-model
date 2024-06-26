@@ -1,4 +1,5 @@
 import itertools
+import json
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -62,9 +63,9 @@ class ChurnEnsemble(object):
     min_tte : int, optional
         Minimum time to event for binary classification (positive if `tte` <= `min_tte`).
         Defaults to 1 (churn if customer churns in the current period or the next).
-    test_size : float, optional
-        Percentage of the data to use for test/validation.
-        Defaults to 0.25 (25%).
+    max_sl : int, optional
+        Maximum sequence length.
+        If 0, the maximum sequence length will be set to the maximum sequence length from data.
     seed : int, optional
         Base random seed for reproducibility.
     verbose : int, optional
@@ -81,6 +82,7 @@ class ChurnEnsemble(object):
     def __init__(
         self,
         min_tte: int = 1,
+        max_sl: int = 0,
         seed: int = 42,
         verbose: int = 0,
         path: Optional[str] = None,
@@ -101,12 +103,13 @@ class ChurnEnsemble(object):
 
         # Execution params
         self.min_tte = min_tte
+        self.max_sl = max_sl
         self.seed = seed
         self.verbose = verbose
         self.path = self.set_path(path)
 
-        # Model config
-        self.config = {
+        # Model params
+        self.params = {
             'wtte': {
                 'features': kwargs.get('wtte', {}).get('features', []),
                 'params': kwargs.get('wtte', {}).get('params', {})
@@ -117,7 +120,7 @@ class ChurnEnsemble(object):
             }
         }
 
-        self._data = pd.DataFrame()  # Input data
+        self.data = pd.DataFrame()  # Input data
         self.dtrain = pd.DataFrame()  # Training data split
         self.dtest = pd.DataFrame()  # Test data split
 
@@ -138,8 +141,7 @@ class ChurnEnsemble(object):
             'recall': .0  # Recall
         }
 
-    @property
-    def params(self) -> dict:
+    def get_params(self) -> dict:
         """
         Get model parameters.
 
@@ -149,8 +151,8 @@ class ChurnEnsemble(object):
             Model parameters.
         """
         return {
-            'wtte': self.wtte.params if self.wtte is not None else self.config['wtte']['params'],
-            'xgb': self.xgb.params if self.xgb is not None else self.config['xgb']['params']
+            'wtte': self.wtte.params if self.wtte is not None else self.params['wtte']['params'],
+            'xgb': self.xgb.params if self.xgb is not None else self.params['xgb']['params']
         }
     
     def set_data(
@@ -160,6 +162,14 @@ class ChurnEnsemble(object):
     ) -> Self:
         """
         Set the data for the ensemble and split into training and test sets.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Input data.
+        test_size : float, optional
+            Percentage of the data to use for test/validation.
+            If provided, the data is split into training and test sets.
         """
         self.data = data.sort_values([self.id_col, self.tfs_col])
 
@@ -213,8 +223,8 @@ class ChurnEnsemble(object):
         """
         Build the ensemble model.
         """
-        self.wtte = self.create_wtte(self.config['wtte'])
-        self.xgb = self.create_xgb(self.config['xgb'])
+        self.wtte = self.create_wtte(self.params['wtte'])
+        self.xgb = self.create_xgb(self.params['xgb'])
 
         return self
 
@@ -238,6 +248,7 @@ class ChurnEnsemble(object):
         return WTTE(
             features=config['features'],
             min_tte=self.min_tte,
+            max_sl=self.max_sl,
             seed=self.seed,
             verbose=self.verbose,
             path=f'{self.path}/wtte',
@@ -303,6 +314,7 @@ class ChurnEnsemble(object):
         """
         return WTTE(
             min_tte=self.min_tte,
+            max_sl=self.max_sl,
             seed=self.seed,
             verbose=self.verbose,
             path=f'{self.path}/wtte',
@@ -330,7 +342,7 @@ class ChurnEnsemble(object):
         """
         Fit the Weibull Time To Event model.
         """
-        # Select train data as customer sequences between [dt_start] and [dt_split]
+        # Set train data
         d_wtte_train = self.dtrain[[self.id_col, self.tfs_col, self.tte_col] + self.wtte.features]
         # Scale/Normalize features
         self.wtte.scaler = StandardScaler()
@@ -338,28 +350,35 @@ class ChurnEnsemble(object):
         # Build train tensor
         x_wtte_train, y_wtte_train = self.wtte.build_seq(d_wtte_train, deep=False)
 
-        # Select validation data as customer sequences between [dt_start] and [dt_end]
-        # Keeping only the customers that haven't churned or were still alive at [dt_split]
+        # Set test data
         d_wtte_test = self.dtest[[self.id_col, self.tfs_col, self.tte_col] + self.wtte.features]
         # Scale/Normalize features using the scaler from the training data
         d_wtte_test[self.wtte.features] = self.wtte.scaler.transform(d_wtte_test[self.wtte.features])
-        # Build validation tensor
+        # Build test tensor
         x_wtte_test, y_wtte_test = self.wtte.build_seq(d_wtte_test, deep=False)
 
         # Fit WTTE model
         self.wtte.fit(x_wtte_train, y_wtte_train, x_wtte_test, y_wtte_test)
         # Plot training history
         self.wtte.plot_history_eval(show=False, file='wtte-history.png')
+        # Plot training weights
+        self.wtte.plot_weights(show=False, file='wtte-weights.png')
+
+        # Build deep validation tensor
+        # In this case, we need the complete (deep) sequences in order to analize the model performance
+        x_wtte_deep, y_wtte_deep = self.wtte.build_seq(d_wtte_test, deep=True)
 
         # Get sequence lengths
-        self.wtte.sls = self.wtte.get_seq_lengths(y_wtte_test)
+        self.wtte.sls = self.wtte.get_seq_lengths(y_wtte_deep)
         # Predict
-        y_wtte_hat = self.wtte.predict(x_wtte_test)
+        y_wtte_hat = self.wtte.predict(x_wtte_deep)
         # Set results
         self.wtte.set_results(y_wtte_hat)
 
-        # Plot parameters distribution
-        self.wtte.plot_params_dist(self.wtte.results, loc=-1, show=False, file='wtte-params.png')
+        # Plot the distribution of Weibull alpha and beta parameters
+        self.wtte.plot_params_dist(loc=-1, show=False, file='wtte-params-dist.png')
+        # Plot each customer Weibull alpha and beta parameters over time
+        self.wtte.plot_params_seq(show=False, file='wtte-params-seq.png')
 
         return self
     
@@ -368,7 +387,7 @@ class ChurnEnsemble(object):
         Fit the XGBoost model, using the Weibull Time To Event model predictions as input,
         along with the features defined for the model.
         """
-        # Select prediction data as customer sequences between [dt_start] and [dt_end]
+        # Set prediction data
         d_wtte_pred = self.data[[self.id_col, self.tfs_col, self.tte_col] + self.wtte.features]
         # Scale/Normalize features using the scaler from the training data
         d_wtte_pred[self.wtte.features] = self.wtte.scaler.transform(d_wtte_pred[self.wtte.features])
@@ -382,7 +401,8 @@ class ChurnEnsemble(object):
         # Set results
         self.wtte.set_results(y_wtte_hat)
 
-        # Select train data as customer sequences between [dt_start] and [dt_split]
+        # Set train data
+        # Include the Weibull Time To Event model predictions
         d_xgb_train = self.dtrain.merge(
             self.wtte.results[[self.id_col, self.tfs_col, self.wa_col, self.wb_col]],
             on=[self.id_col, self.tfs_col], how='left'
@@ -390,8 +410,8 @@ class ChurnEnsemble(object):
         # Build train tensor
         x_xgb_train, y_xgb_train = self.xgb.build_seq(d_xgb_train)
 
-        # Select validation data as customer sequences between [dt_split] and [dt_end]
-        # Merge the Weibull Time To Event model predictions with the features
+        # Set test data
+        # Include the Weibull Time To Event model predictions
         d_xgb_test = self.dtest.merge(
             self.wtte.results[[self.id_col, self.tfs_col, self.wa_col, self.wb_col]],
             on=[self.id_col, self.tfs_col], how='left'
@@ -418,15 +438,10 @@ class ChurnEnsemble(object):
         self.fit_wtte()
         self.fit_xgb()
 
-        # Compute and set model scores
-        self.set_scores()
         # Set model results from XGBoost predictions
         self.set_results()
-
-        # Plot scores summary
-        self.plot_scores(show=False, file='scores.png')
-        # Plot histogram of predicted probabilities for each customer sequence
-        self.plot_histogram(show=False, file='histogram.png')
+        # Compute and set model scores
+        self.set_scores()
 
         return self
 
@@ -434,7 +449,7 @@ class ChurnEnsemble(object):
         """
         Predict the churn probability for the customers in the data.
         """
-        # Select prediction data as given customer sequences
+        # Set prediction data
         d_wtte_pred = self.data[[self.id_col, self.tfs_col, self.tte_col] + self.wtte.features]
         # Scale/Normalize features using the scaler from the training data
         d_wtte_pred[self.wtte.features] = self.wtte.scaler.transform(d_wtte_pred[self.wtte.features])
@@ -448,8 +463,8 @@ class ChurnEnsemble(object):
         # Set results
         self.wtte.set_results(y_wtte_hat)
 
-        # Select prediction data as given customer sequences
-        # Merge the Weibull Time To Event model predictions with the features
+        # Set prediction data
+        # Include the Weibull Time To Event model predictions
         d_xgb_pred = self.data.merge(
             self.wtte.results[[self.id_col, self.tfs_col, self.wa_col, self.wb_col]],
             on=[self.id_col, self.tfs_col], how='left'
@@ -464,6 +479,69 @@ class ChurnEnsemble(object):
 
         # Set model results from XGBoost predictions
         self.set_results()
+
+        return self
+
+    def set_results(
+        self,
+        results: Optional[pd.DataFrame] = None
+    ) -> Self:
+        """
+        Set the results DataFrame with predicted results, along with other computed values.
+
+        Parameters
+        ----------
+        results : pd.DataFrame, optional
+            Predicted values.
+            If not provided, XGBoost model results will be used.
+        """
+        if results is not None:
+            dr = results.copy()
+        else:
+            dr = self.xgb.results.copy()
+        
+        rcols = list(dr.columns)
+
+        # Set target column to 1 if the prediction is greater than the threshold, 0 otherwise
+        dr['tgt'] = (dr['pred'] > self.thr).astype(int)
+
+        # Get cluster labels for each customer sequence
+        if dr['tgt'].unique().shape[0] == 2:  # We have 2 classes (churn, no churn)
+            # For customers that did not churn (0) -> 3 segments
+            c_0 = self.get_clusters(dr[dr['tgt'] == 0]['pred'], 3)
+            # For customers that churned (1) -> 2 segments
+            c_1 = self.get_clusters(dr[dr['tgt'] == 1]['pred'], 2) + 3
+            dr['segment'] = pd.concat([c_0, c_1], axis=0)
+        else:  # Only 1 class available
+            # Cluster all customers into 5 segments
+            dr['segment'] = self.get_clusters(dr['pred'], 5)
+
+        # Set WTTE results
+        if self.wa_col not in dr.columns:
+            if self.wtte is not None:
+                dr = dr.merge(
+                    self.wtte.results[[self.id_col, self.tfs_col, self.wa_col, self.wb_col]],
+                    on=[self.id_col, self.tfs_col], how='left'
+                ).rename(columns={
+                    self.wa_col: 'wa',
+                    self.wb_col: 'wb'
+                })
+            else:
+                dr[self.wa_col] = np.NaN
+                dr[self.wb_col] = np.NaN
+
+        # Set Momentum and customer IDs (for identification)
+        dr = dr.merge(
+            self.data[[self.id_col, self.tfs_col, self.cid_col, 'momentum']],
+            on=[self.id_col, self.tfs_col], how='left'
+        ).rename(columns={
+            self.cid_col: 'cid'
+        })
+
+        # Sort and select columns
+        self.results = dr.sort_values([self.id_col, self.tfs_col])[rcols + [
+            'tgt', 'segment', 'wa', 'wb', 'momentum', 'cid'
+        ]]
 
         return self
 
@@ -506,56 +584,10 @@ class ChurnEnsemble(object):
             y_tgt = np.array([1 if i > self.thr else 0 for i in dr.pred.values])
             self.scores['acc'] = accuracy_score(dr.true.values, y_tgt)
 
-        return self
-
-    def set_results(
-        self,
-        results: Optional[pd.DataFrame] = None
-    ) -> Self:
-        """
-        Set the results DataFrame with predicted results, along with other computed values.
-
-        Parameters
-        ----------
-        results : pd.DataFrame, optional
-            Predicted values.
-            If not provided, XGBoost model results will be used.
-        """
-        if results is not None:
-            dr = results.copy()
-        else:
-            dr = self.xgb.results.copy()
-        
-        rcols = list(dr.columns)
-
-        # Set target column to 1 if the prediction is greater than the threshold, 0 otherwise
-        dr['tgt'] = (dr['pred'] > self.thr).astype(int)
-
-        # Get cluster labels for each customer sequence
-        # For customers that did not churn (0) -> 3 segments
-        c_0 = self.get_clusters(dr[dr['tgt'] == 0]['pred'], 3)
-        # For customers that churned (1) -> 2 segments
-        c_1 = self.get_clusters(dr[dr['tgt'] == 1]['pred'], 2) + 3
-        # Set the segment column to the computed labels
-        dr['segment'] = pd.concat([c_0, c_1], axis=0)
-
-        # Set WTTE results, Momentum and customer IDs (for identification)
-        dr = dr.merge(
-            self.wtte.results[[self.id_col, self.tfs_col, self.wa_col, self.wb_col]],
-            on=[self.id_col, self.tfs_col], how='left'
-        ).merge(
-            self.data[[self.id_col, self.tfs_col, self.cid_col, 'momentum']],
-            on=[self.id_col, self.tfs_col], how='left'
-        ).rename(columns={
-            self.wa_col: 'wa',
-            self.wb_col: 'wb',
-            self.cid_col: 'cid'
-        })
-        
-        # Sort and select columns
-        self.results = dr.sort_values([self.id_col, self.tfs_col])[rcols + [
-            'tgt', 'segment', 'wa', 'wb', 'momentum', 'cid'
-        ]]
+        # Plot scores summary
+        self.plot_scores(show=False, file='scores.png')
+        # Plot histogram of predicted probabilities for each customer sequence
+        self.plot_histogram(show=False, file='histogram.png')
 
         return self
     
@@ -617,7 +649,9 @@ class ChurnEnsemble(object):
             dr = self.results.copy()
 
         if self.tfs_col in dr.columns and loc is not None:
-            dr = dr.sort_values([self.id_col, self.tfs_col]).groupby(self.id_col).nth(loc).reset_index()
+            dr = dr.sort_values([
+                self.id_col, self.tfs_col
+            ]).groupby(self.id_col).nth(loc).drop(columns=[self.tfs_col])
 
         return dr
 
@@ -695,6 +729,8 @@ class ChurnEnsemble(object):
 
     def plot_scores(
         self,
+        results: Optional[pd.DataFrame] = None,
+        loc: Optional[int] = -1,
         show: bool = True,
         file: Optional[str] = None
     ):
@@ -704,11 +740,26 @@ class ChurnEnsemble(object):
 
         Parameters
         ----------
+        results : pd.DataFrame, optional
+            Predicted values.
+            If not provided, XGBoost model results will be used.
+        loc : int, optional
+            Location in each customer sequence.
+            If provided, only the value at the given location will be used.
+            If -1, it will use the last sequence prediction for each customer.
         show : bool, optional
             If True, the plot will be displayed.
         file : str, optional
             If provided, the plot will be saved to the given file.
         """
+        if results is not None:
+            dr = results.copy()
+        else:
+            dr = self.results.copy()
+
+        if self.tfs_col in dr.columns and loc is not None:
+            dr = dr.sort_values([self.id_col, self.tfs_col]).groupby(self.id_col).nth(loc).reset_index()
+
         summary = ['Thereshold: {}%'.format(format_number(self.thr * 100, 0))]
         for key, val in self.scores.items():
             summary.append('{}: {}%'.format(key.upper(), format_number(val * 100, 0)))
@@ -716,10 +767,10 @@ class ChurnEnsemble(object):
         fig, axs = plt.subplots(nrows=2, ncols=2, figsize=(16, 14), constrained_layout=True)
         axs = axs.flatten()
 
-        self.plot_roc_curve(axs[0])
-        self.plot_precision_recall(axs[1])
-        self.plot_feature_importances(axs[2])
-        self.plot_confusion_matrix(axs[3])
+        self.plot_roc_curve(results=dr, loc=loc, ax=axs[0])
+        self.plot_precision_recall(results=dr, loc=loc, ax=axs[1])
+        self.plot_feature_importances(ax=axs[2])
+        self.plot_confusion_matrix(results=dr, loc=loc, ax=axs[3])
 
         plt.suptitle(' | '.join(summary), y=1.03)
 
@@ -727,6 +778,8 @@ class ChurnEnsemble(object):
 
     def plot_roc_curve(
         self,
+        results: Optional[pd.DataFrame] = None,
+        loc: Optional[int] = -1,
         ax: Optional[plt.Axes] = None,
         show: bool = True,
         file: Optional[str] = None
@@ -743,6 +796,13 @@ class ChurnEnsemble(object):
 
         Parameters
         ----------
+        results : pd.DataFrame, optional
+            Predicted values.
+            If not provided, XGBoost model results will be used.
+        loc : int, optional
+            Location in each customer sequence.
+            If provided, only the value at the given location will be used.
+            If -1, it will use the last sequence prediction for each customer.
         ax : plt.Axes, optional
             Axes object to plot the ROC curve on.
         show : bool, optional
@@ -750,8 +810,16 @@ class ChurnEnsemble(object):
         file : str, optional
             If provided, the plot will be saved to the given file.
         """
-        y_true = self.results['true']
-        y_pred = self.results['pred']
+        if results is not None:
+            dr = results.copy()
+        else:
+            dr = self.results.copy()
+
+        if self.tfs_col in dr.columns and loc is not None:
+            dr = dr.sort_values([self.id_col, self.tfs_col]).groupby(self.id_col).nth(loc).reset_index()
+
+        y_true = dr['true']
+        y_pred = dr['pred']
 
         fpr, tpr, _ = roc_curve(y_true, y_pred)
         roc_auc = auc(fpr, tpr)
@@ -795,6 +863,8 @@ class ChurnEnsemble(object):
 
     def plot_precision_recall(
         self,
+        results: Optional[pd.DataFrame] = None,
+        loc: Optional[int] = -1,
         ax: Optional[plt.Axes] = None,
         show: bool = True,
         file: Optional[str] = None
@@ -807,6 +877,13 @@ class ChurnEnsemble(object):
 
         Parameters
         ----------
+        results : pd.DataFrame, optional
+            Predicted values.
+            If not provided, XGBoost model results will be used.
+        loc : int, optional
+            Location in each customer sequence.
+            If provided, only the value at the given location will be used.
+            If -1, it will use the last sequence prediction for each customer.
         ax : plt.Axes, optional
             Axes object to plot the precision/recall curve on.
         show : bool, optional
@@ -814,8 +891,16 @@ class ChurnEnsemble(object):
         file : str, optional
             If provided, the plot will be saved to the given file.
         """
-        y_true = self.results['true']
-        y_pred = self.results['pred']
+        if results is not None:
+            dr = results.copy()
+        else:
+            dr = self.results.copy()
+
+        if self.tfs_col in dr.columns and loc is not None:
+            dr = dr.sort_values([self.id_col, self.tfs_col]).groupby(self.id_col).nth(loc).reset_index()
+
+        y_true = dr['true']
+        y_pred = dr['pred']
 
         thr, thrs, f1, precision, recall = self.precision_recall(y_true, y_pred)
         best = thrs.index(thr)
@@ -912,6 +997,8 @@ class ChurnEnsemble(object):
 
     def plot_confusion_matrix(
         self,
+        results: Optional[pd.DataFrame] = None,
+        loc: Optional[int] = -1,
         ax: Optional[plt.Axes] = None,
         show: bool = True,
         file: Optional[str] = None
@@ -926,6 +1013,13 @@ class ChurnEnsemble(object):
 
         Parameters
         ----------
+        results : pd.DataFrame, optional
+            Predicted values.
+            If not provided, XGBoost model results will be used.
+        loc : int, optional
+            Location in each customer sequence.
+            If provided, only the value at the given location will be used.
+            If -1, it will use the last sequence prediction for each customer.
         ax : plt.Axes, optional
             Axes object to plot the confusion matrix on.
         show : bool, optional
@@ -933,8 +1027,16 @@ class ChurnEnsemble(object):
         file : str, optional
             If provided, the plot will be saved to the given file.
         """
-        y_true = self.results['true']
-        y_pred = self.results['pred']
+        if results is not None:
+            dr = results.copy()
+        else:
+            dr = self.results.copy()
+
+        if self.tfs_col in dr.columns and loc is not None:
+            dr = dr.sort_values([self.id_col, self.tfs_col]).groupby(self.id_col).nth(loc).reset_index()
+
+        y_true = dr['true']
+        y_pred = dr['pred']
         y_tgt = np.array([1 if i > self.thr else 0 for i in y_pred])
 
         classes = ['0', '1']
@@ -1092,11 +1194,38 @@ class ChurnEnsemble(object):
             Path to save/load the file.
         """
         return f'{self.path}/{name}'
-    
+
+    def file_exists(self, name: str) -> bool:
+        """
+        Check if a file exists.
+        """
+        return os.path.isfile(self.get_path(name))
+
+    def get_config(self) -> dict:
+        """
+        Get the model configuration.
+        """
+        return {
+            k: v for k, v in self.__dict__.items()
+            if k not in [
+                'params', 'data', 'dtrain', 'dtest',
+                'wtte', 'xgb', 'results',
+                'seed', 'verbose', 'path'
+            ]
+        }
+
     def save(self) -> Self:
         """
         Save the ensemble models to files.
         """
+        config = json.dumps(self.get_config())
+        with open(self.get_path('config.json'), 'w') as fh:
+            fh.write(config)
+
+        params = json.dumps(self.params)
+        with open(self.get_path('params.json'), 'w') as fh:
+            fh.write(params)
+
         self.save_wtte()
         self.save_xgb()
 
@@ -1104,11 +1233,22 @@ class ChurnEnsemble(object):
             self.results.to_json(self.get_path('results.json'))
 
         return self
-    
+
     def load(self) -> Self:
         """
         Load the ensemble models from files.
         """
+        if self.file_exists('config.json'):
+            with open(self.get_path('config.json'), 'r') as fh:
+                config = json.load(fh)
+            for k, v in config.items():
+                setattr(self, k, v)
+        
+        if self.file_exists('params.json'):
+            with open(self.get_path('params.json'), 'r') as fh:
+                params = json.load(fh)
+            self.params = params
+
         self.wtte = self.load_wtte()
         self.xgb = self.load_xgb()
 
