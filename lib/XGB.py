@@ -74,10 +74,10 @@ class XGB(object):
 
         # Model params
         self.params = {
-            'n': kwargs.get('n', 1000),  # Number of trees
+            'n': kwargs.get('n', 200),  # Number of trees
             'lr': kwargs.get('lr', 1e-2),  # Learning rate
-            'max_depth': kwargs.get('max_depth', 3),  # Maximum depth of the tree
-            'stop': kwargs.get('stop', 100),  # Early stopping rounds
+            'max_depth': kwargs.get('max_depth', 16),  # Maximum depth of the tree
+            'stop': kwargs.get('stop', 0),  # Early stopping rounds
             'metric': kwargs.get('metric', 'auc'),  # Metric to optimize
             'min_child_weight': kwargs.get('min_child_weight', 1),  # Minimum weight of a leaf
             'gamma': kwargs.get('gamma', 0),  # Minimum loss reduction required to split a leaf
@@ -85,7 +85,7 @@ class XGB(object):
             'weight_l2': kwargs.get('weight_l2', 1),  # L2 regularization coefficient
             'dropout': kwargs.get('dropout', 0.2),  # Dropout rate
             'shuffle': kwargs.get('shuffle', False),  # Shuffle training data
-            'reg_unb': kwargs.get('reg_unb', False)  # Regularize unbalanced classes
+            'reg_unb': kwargs.get('reg_unb', True)  # Regularize unbalanced classes
         }
 
         # Model instance

@@ -96,16 +96,17 @@ class WTTE(object):
         self.params = {
             'nn': kwargs.get('nn', 0),  # Number of neurons in each LSTM layer (0 = max_sl)
             'hl': kwargs.get('hl', 2),  # Number of LSTM layers
-            'lr': kwargs.get('lr', 1e-3),  # Learning rate
-            'epochs': kwargs.get('epochs', 100),  # Number of epochs
-            'batch': kwargs.get('batch', 32),  # Batch size
-            'lr_decay': kwargs.get('lr_decay', 0),  # Learning rate decay (number of epochs, 0 = no decay)
-            'stop': kwargs.get('stop', 0),  # Early stopping patience (number of epochs, 0 = no early stopping)
-            'dropout': kwargs.get('dropout', 0.2),  # Dropout rate
-            'weight_l1': kwargs.get('weight_l1', 0),  # L1 regularization penalty (0 = no L1 regularization)
-            'weight_l2': kwargs.get('weight_l2', 1e-5),  # L2 regularization penalty (0 = no L2 regularization)
+            'lr': kwargs.get('lr', 1e-4),  # Learning rate
+            'epochs': kwargs.get('epochs', 200),  # Number of epochs
+            'batch': kwargs.get('batch', 512),  # Batch size
+            'lr_decay': kwargs.get('lr_decay', 0),  # Learning rate decay (number of epochs)
+            'stop': kwargs.get('stop', 0),  # Early stopping patience (number of epochs)
+            'dropout': kwargs.get('dropout', 0.1),  # Dropout rate
+            'weight_l1': kwargs.get('weight_l1', 0),  # L1 regularization penalty
+            'weight_l2': kwargs.get('weight_l2', 1e-5),  # L2 regularization penalty
             'init_alpha': kwargs.get('init_alpha', None),  # Initialize alpha value (None = compute from data)
-            'max_beta': kwargs.get('max_beta', 2.),  # Maximum beta value (used to regularize beta values)
+            'max_beta': kwargs.get('max_beta', 2.),  # Max beta value (regularize beta with value > 1)
+            'shuffle': kwargs.get('shuffle', False),  # Shuffle data before training
             'epsilon': kwargs.get('epsilon', 1e-8)  # Epsilon value to avoid numerical instability
         }
 
@@ -166,19 +167,17 @@ class WTTE(object):
         for _ in np.arange(self.params['hl']):
             model.add(
                 keras.layers.LSTM(
-                    self.params['nn'],
+                    units=self.params['nn'],
                     activation='tanh',
                     dropout=self.params['dropout'],
-                    recurrent_dropout=self.params['dropout'],
                     kernel_regularizer=regularizer,
-                    recurrent_regularizer=regularizer,
                     return_sequences=True
                 )
             )
+
             model.add(
-                keras.layers.BatchNormalization(
-                    gamma_regularizer=regularizer,
-                    beta_regularizer=regularizer
+                keras.layers.LayerNormalization(
+                    epsilon=keras.config.epsilon()
                 )
             )
 
@@ -186,15 +185,17 @@ class WTTE(object):
             keras.layers.Dense(2)
         )
         model.add(
-            keras.layers.Activation(self.activation)
+            keras.layers.Activation(
+                self.activation
+            )
         )
 
         model.compile(
-            loss=self.loss,
             optimizer=keras.optimizers.Adam(
                 learning_rate=self.params['lr'],
                 clipnorm=1.
-            )
+            ),
+            loss=self.loss
         )
 
         return model
@@ -217,7 +218,7 @@ class WTTE(object):
 
             (activation)
             Exponential units seems to give faster training than
-            the original papers softplus units. Makes sense due to logarithmic
+            the original paper's softplus units. Makes sense due to logarithmic
             effect of change in alpha.
             (initialization)
             To get faster training and fewer exploding gradients,
@@ -465,17 +466,11 @@ class WTTE(object):
         # Set maximum beta value
         self.max_beta = self.params['max_beta']
 
-        # Load model
-        self.model = self.build_model()
-
-        # Print model summary
+        # Print model params
         if self.verbose > 0:
             print(f'{self.kind} -> Max Length: {self.max_sl} | Mask: {self.mask:.2f}')
-            print(f'Alpha -> Mean: {self.a_mean:.2f} | Median: {np.nanmedian(y[..., 0]):.2f}')
-            print(f'Beta -> Mean: {self.b_mean:.2f} | Median: {np.nanmedian(y[..., 1]):.2f}')
-            print(f'Params -> Init Alpha: {self.init_alpha:.2f} | Max Beta: {self.max_beta:.2f}')
-            print()
-            self.print_model_summary()
+            print(f'Alpha Mean: {self.a_mean:.2f} | Beta Mean: {self.b_mean:.2f}')
+            print(f'Init Alpha: {self.init_alpha:.2f} | Max Beta: {self.max_beta:.2f}')
         
         return self
 
@@ -511,6 +506,11 @@ class WTTE(object):
         x_train, y_train, _ = self.input_seq(x_train, y_train)
         x_test, y_test, _ = self.input_seq(x_test, y_test)
 
+        # Load model
+        self.model = self.build_model()
+        if self.verbose > 0:
+            self.print_model_summary()
+
         nant = keras.callbacks.TerminateOnNaN()
         callbacks = [nant]
 
@@ -520,7 +520,7 @@ class WTTE(object):
                 monitor='val_loss',
                 patience=self.params['lr_decay'],
                 factor=0.1,
-                min_lr=self.params['lr'] * 0.01,
+                min_lr=self.params['lr'] * 0.1,
                 verbose=self.verbose
             )
             callbacks.append(lr_decay)
@@ -533,13 +533,22 @@ class WTTE(object):
         watcher = WeightWatcher(level=self.wlevel)
         callbacks.append(watcher)
 
+        if self.verbose > 1:
+            board = keras.callbacks.TensorBoard(
+                log_dir=self.get_path('logs'),
+                histogram_freq=1,
+                write_images=True,
+                update_freq=self.wlevel
+            )
+            callbacks.append(board)
+
         # Fit model
         h = self.model.fit(
             x_train, y_train,
             epochs=self.params['epochs'],
             batch_size=self.params['batch'],
             validation_data=(x_test, y_test),
-            shuffle=False,
+            shuffle=self.params['shuffle'],
             verbose=self.verbose,
             callbacks=callbacks
         )
@@ -1075,7 +1084,7 @@ class WTTE(object):
         if is_array(t):
             t = np.asfarray(t)
         else:
-            t = np.asfarray(np.arange(t))
+            t = np.asfarray(np.arange(t + 1))
 
         # Weibull PDF
         pdf = (b / a) * np.power(t / a, b - 1) * np.exp(-np.power(t / a, b))
@@ -1121,7 +1130,7 @@ class WTTE(object):
         if is_array(t):
             t = np.asfarray(t)
         else:
-            t = np.asfarray(np.arange(t))
+            t = np.asfarray(np.arange(t + 1))
 
         # Weibull CDF
         cdf = 1 - np.exp(-np.power(t / a, b))
@@ -1167,7 +1176,7 @@ class WTTE(object):
         if is_array(t):
             t = np.asfarray(t)
         else:
-            t = np.asfarray(np.arange(t))
+            t = np.asfarray(np.arange(t + 1))
 
         # Weibull PMF
         pmf = np.exp(-np.power(t / a, b)) - np.exp(-np.power((t + 1) / a, b))
@@ -1213,7 +1222,7 @@ class WTTE(object):
         if is_array(t):
             t = np.asfarray(t)
         else:
-            t = np.asfarray(np.arange(t))
+            t = np.asfarray(np.arange(t + 1))
         
         # Weibull CMF
         cmf = 1 - np.exp(-np.power((t + 1) / a, b))
@@ -1259,7 +1268,7 @@ class WTTE(object):
         kind = kind or self.kind
 
         if t is None:
-            t = self.min_tte + 1
+            t = int(self.min_tte)
 
         if kind == 'discrete':
             c = self.weibull_cmf(ab, t=t)
@@ -1572,10 +1581,10 @@ class WTTE(object):
             fig = None
 
         ax.plot(
-            df.index, df['loss'].values, color=get_color('blue'), label='loss'
+            df.index.values, df['loss'].values, color=get_color('blue'), label='loss'
         )
         ax.plot(
-            df.index, df['val_loss'].values, color=get_color('orange'), label='val_loss'
+            df.index.values, df['val_loss'].values, color=get_color('orange'), label='val_loss'
         )
 
         if 'learning_rate' in self.history.columns:
@@ -1583,9 +1592,9 @@ class WTTE(object):
 
             ax2 = ax.twinx()
             ax2.plot(
-                df.index, df['learning_rate'].values,
+                df.index.values, df['learning_rate'].values,
                 color=get_color('grey'), ls='--', lw=2, alpha=0.2,
-                label=f'learning rate ({lr:.0e})'
+                label='learning rate'
             )
 
             ax2.set_ylim((lr * 0.001, lr * 10))
@@ -1614,12 +1623,16 @@ class WTTE(object):
         file : str, optional
             If provided, the figure will be saved to a file.
         """
-        b = self.watcher.bias[:, -1]
-        w = self.watcher.weights[:, -1]
+        b = self.watcher.bias
+        b_mean = b.mean(axis=1)
+
+        epochs = b.shape[0]
+        x = np.arange(epochs)
+
+        w = self.watcher.weights.reshape(epochs, -1, 2)
         w_mean = w.mean(axis=1)
         w_min = w.min(axis=1)
         w_max = w.max(axis=1)
-        x = np.arange(w.shape[0])
 
         fig, axs = plt.subplots(nrows=1, ncols=2, figsize=(16, 5), constrained_layout=True)
         axs = axs.flatten()
@@ -1627,10 +1640,10 @@ class WTTE(object):
         bax = axs[0]
         bax2 = bax.twinx()
 
-        bax.plot(x, b[:, 0], color=get_color('blue'))
+        bax.plot(x, b_mean[:, 0], color=get_color('blue'))
         bax.set_ylabel('alpha')
 
-        bax2.plot(x, b[:, 1], color=get_color('red'))
+        bax2.plot(x, b_mean[:, 1], color=get_color('red'))
         bax2.set_ylabel('beta')
 
         for t in bax.get_yticklabels():

@@ -24,7 +24,7 @@ from sklearn.metrics import (
 
 from .WTTE import WTTE
 from .XGB import XGB
-from .utils import format_number, get_color
+from .utils import format_number, get_color, is_array
 
 
 class ChurnEnsemble(object):
@@ -658,7 +658,8 @@ class ChurnEnsemble(object):
     def precision_recall(
         self,
         y_true: np.ndarray,
-        y_pred: np.ndarray
+        y_pred: np.ndarray,
+        res: int | float = 1
     ) -> tuple[float, list[float], list[float], list[float], list[float]]:
         """
         Calculate the precision, recall and F1 scores for the given true and predicted values.
@@ -710,7 +711,9 @@ class ChurnEnsemble(object):
         precision = []
         recall = []
 
-        thrs = [x / 100. for x in range(0, 105, 5)]
+        if res >= 1:
+            res /= 100.
+        thrs = np.arange(0, 1 + res, res).round(2).tolist()
 
         for x in thrs:
             t_pred = np.array([1. if i > x else 0. for i in y_pred])
