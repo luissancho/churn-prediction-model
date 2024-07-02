@@ -43,7 +43,8 @@ class XGB(object):
         Verbosity level.
         If 0, no output will be printed.
         If 1, only important messages will be printed.
-        If 2, all messages will be printed (including fit and predict outputs).
+        If 2, all messages will be printed (including model fit and predict outputs).
+        If 3, debug mode (all messages + model outputs + XGBoost logs).
     path : str, optional
         Path to store model files and images.
     kwargs : dict, optional

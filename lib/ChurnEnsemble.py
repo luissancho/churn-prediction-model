@@ -24,7 +24,7 @@ from sklearn.metrics import (
 
 from .WTTE import WTTE
 from .XGB import XGB
-from .utils import format_number, get_color, is_array
+from .utils import format_number, get_color, momentum
 
 
 class ChurnEnsemble(object):
@@ -73,6 +73,7 @@ class ChurnEnsemble(object):
         If 0, no output will be printed.
         If 1, only important messages will be printed.
         If 2, all messages will be printed (including fit and predict outputs).
+        If 3, debug mode (all messages + model outputs + TensorBoard/XGBoost logs).
     path : str, optional
         Path to store model files and images.
     kwargs : dict, optional
@@ -96,6 +97,9 @@ class ChurnEnsemble(object):
         self.tfs_col = 'tfs'  # Periods from start date
         self.tte_col = 'tte'  # Periods until end date
         self.cid_col = 'cid'  # Customer ID
+
+        # Momentum name
+        self.mom_col = 'mom'
 
         # Weibull parameters
         self.wa_col = 'wa'  # Alpha
@@ -176,38 +180,17 @@ class ChurnEnsemble(object):
         for col in [self.tp_col, self.ts_col, self.te_col]:
             self.data[col] = pd.to_datetime(self.data[col])
 
-        if self.verbose > 0:
-            cs = (
-                self.data.sort_values([self.id_col, self.tfs_col]).groupby(self.id_col)[self.tte_col].last() < 0
-            ).value_counts().sort_index().astype(float)
-            print('Total Customers: {} | Censored: {} | Non-censored: {} | Censored Rate {}%'.format(
-                format_number(cs.sum()),
-                format_number(cs[1]),
-                format_number(cs[0]),
-                format_number(100 * cs[1] / cs.sum(), 2)
-            ))
-        
         if test_size is not None:
             d_split = self.data.sort_values([self.id_col, self.tfs_col]).groupby(self.id_col)[self.tte_col].last().reset_index()
-            d_split['censored'] = d_split[self.tte_col] < 0
+            stratify = (d_split[self.tte_col] < 0).astype(int)
 
             d_train, d_test = train_test_split(
                 d_split,
                 test_size=test_size,
                 shuffle=True,
-                stratify=d_split['censored'].astype(int),
+                stratify=stratify,
                 random_state=self.seed
             )
-
-            if self.verbose > 0:
-                cs_train = d_train['censored'].value_counts().sort_index().astype(float)
-                cs_test = d_test['censored'].value_counts().sort_index().astype(float)
-                print('Train: {} ({}%) | Test: {} ({}%)'.format(
-                    format_number(len(d_train)),
-                    format_number(100 * cs_train[1] / cs_train.sum(), 2),
-                    format_number(len(d_test)),
-                    format_number(100 * cs_test[1] / cs_test.sum(), 2)
-                ))
             
             self.dtrain = self.data[
                 self.data[self.id_col].isin(d_train[self.id_col])
@@ -590,7 +573,7 @@ class ChurnEnsemble(object):
         self.plot_histogram(show=False, file='histogram.png')
 
         return self
-    
+
     def get_clusters(
         self,
         y: pd.Series,

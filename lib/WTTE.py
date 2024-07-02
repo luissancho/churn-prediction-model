@@ -53,7 +53,8 @@ class WTTE(object):
         Verbosity level.
         If 0, no output will be printed.
         If 1, only important messages will be printed.
-        If 2, all messages will be printed (including fit and predict outputs).
+        If 2, all messages will be printed (including model fit and predict outputs).
+        If 3, debug mode (all messages + model outputs + TensorBoard logs).
     path : str, optional
         Path to store model files and images.
     kwargs : dict, optional
@@ -171,6 +172,7 @@ class WTTE(object):
                     activation='tanh',
                     dropout=self.params['dropout'],
                     kernel_regularizer=regularizer,
+                    seed=self.seed,
                     return_sequences=True
                 )
             )
@@ -508,7 +510,7 @@ class WTTE(object):
 
         # Load model
         self.model = self.build_model()
-        if self.verbose > 0:
+        if self.verbose > 1:
             self.print_model_summary()
 
         nant = keras.callbacks.TerminateOnNaN()
@@ -521,7 +523,7 @@ class WTTE(object):
                 patience=self.params['lr_decay'],
                 factor=0.1,
                 min_lr=self.params['lr'] * 0.1,
-                verbose=self.verbose
+                verbose=int(self.verbose > 1)
             )
             callbacks.append(lr_decay)
 
@@ -533,7 +535,7 @@ class WTTE(object):
         watcher = WeightWatcher(level=self.wlevel)
         callbacks.append(watcher)
 
-        if self.verbose > 1:
+        if self.verbose > 2:
             board = keras.callbacks.TensorBoard(
                 log_dir=self.get_path('logs'),
                 histogram_freq=1,
