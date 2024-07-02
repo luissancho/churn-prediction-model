@@ -24,7 +24,7 @@ from sklearn.metrics import (
 
 from .WTTE import WTTE
 from .XGB import XGB
-from .utils import format_number, get_color, momentum
+from .utils import format_number, get_color
 
 
 class ChurnEnsemble(object):
@@ -80,6 +80,19 @@ class ChurnEnsemble(object):
         Additional parameters to be used in the model.
     """
 
+    # Column names
+    id_col = 'id'  # Customer sequence ID
+    tp_col = 'tp'  # Period (month)
+    ts_col = 'ts'  # Start date
+    te_col = 'te'  # End date
+    tfs_col = 'tfs'  # Periods from start date
+    tte_col = 'tte'  # Periods until end date
+    cid_col = 'cid'  # Customer database ID
+
+    # Weibull names
+    wa_col = 'wa'  # Alpha
+    wb_col = 'wb'  # Beta
+
     def __init__(
         self,
         min_tte: int = 1,
@@ -89,22 +102,6 @@ class ChurnEnsemble(object):
         path: Optional[str] = None,
         **kwargs
     ):
-        # Column names
-        self.id_col = 'id'  # Sequence ID
-        self.tp_col = 'tp'  # Period (month)
-        self.ts_col = 'ts'  # Start date
-        self.te_col = 'te'  # End date
-        self.tfs_col = 'tfs'  # Periods from start date
-        self.tte_col = 'tte'  # Periods until end date
-        self.cid_col = 'cid'  # Customer ID
-
-        # Momentum name
-        self.mom_col = 'mom'
-
-        # Weibull parameters
-        self.wa_col = 'wa'  # Alpha
-        self.wb_col = 'wb'  # Beta
-
         # Execution params
         self.min_tte = min_tte
         self.max_sl = max_sl

@@ -61,6 +61,16 @@ class WTTE(object):
         Additional parameters to be used in the model.
     """
 
+    # Column names
+    id_col = 'id'  # Customer ID
+    seq_col = 'seq'  # Current sequence
+    tfs_col = 'tfs'  # Periods from start date
+    tte_col = 'tte'  # Periods until end date
+
+    # Weibull names
+    wa_col = 'wa'  # Alpha
+    wb_col = 'wb'  # Beta
+
     def __init__(
         self,
         features: Optional[list[str]] = None,
@@ -73,16 +83,6 @@ class WTTE(object):
         path: Optional[str] = None,
         **kwargs
     ):
-        # Column names
-        self.id_col = 'id'  # User ID
-        self.seq_col = 'seq'  # Current sequence
-        self.tfs_col = 'tfs'  # Periods from start date
-        self.tte_col = 'tte'  # Periods until end date
-
-        # Weibull parameters to be predicted
-        self.wa_col = 'wa'  # Alpha
-        self.wb_col = 'wb'  # Beta
-
         # Execution params
         self.features = features or []
         self.min_tte = min_tte

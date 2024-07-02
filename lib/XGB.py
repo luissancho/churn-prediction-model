@@ -51,6 +51,12 @@ class XGB(object):
         Additional parameters to be used in the model.
     """
 
+    # Column names
+    id_col = 'id'  # Customer ID
+    tfs_col = 'tfs'  # Periods from start date
+    tte_col = 'tte'  # Periods until end date
+    tgt_col = 'tgt'  # Target value (binary classification (positive if `tte` <= `min_tte`))
+
     def __init__(
         self,
         features: Optional[list[str]] = None,
@@ -60,12 +66,6 @@ class XGB(object):
         path: Optional[str] = None,
         **kwargs
     ):
-        # Column names
-        self.id_col = 'id'  # User ID
-        self.tfs_col = 'tfs'  # Periods from start date
-        self.tte_col = 'tte'  # Periods until end date
-        self.tgt_col = 'tgt'  # Target value (binary classification (positive if `tte` <= `min_tte`))
-
         # Execution params
         self.features = features or []
         self.min_tte = min_tte
