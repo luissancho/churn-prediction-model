@@ -635,8 +635,8 @@ class ChurnEnsemble(object):
 
         return dr
 
+    @staticmethod
     def precision_recall(
-        self,
         y_true: np.ndarray,
         y_pred: np.ndarray,
         res: int | float = 1
@@ -709,6 +709,38 @@ class ChurnEnsemble(object):
         thr = thrs[best]
 
         return thr, thrs, f1, precision, recall
+    
+    @staticmethod
+    def print_censored_rate(
+        data: pd.DataFrame,
+        name: str = 'Total'
+    ):
+        """
+        Print the censored rate for the given data.
+        Censored sequences are the ones where the churn date is not known (last `tte` < 0).
+
+        Parameters
+        ----------
+        data : pd.DataFrame, optional
+            Data to calculate the censored rate.
+            If not provided, model data will be used.
+        name : str, optional
+            Name to print the censored rate.
+        """
+        cs = pd.Categorical(
+            data.sort_values([
+                ChurnEnsemble.id_col, ChurnEnsemble.tp_col
+            ]).groupby(ChurnEnsemble.id_col)[ChurnEnsemble.tte_col].last() < 0,
+            categories=[False, True]
+        ).value_counts().astype(float)
+
+        print('{} Customers: {} | Censored: {} | Non-censored: {} | Censored Rate {}%'.format(
+            name,
+            format_number(cs.sum()),
+            format_number(cs[True]),
+            format_number(cs[False]),
+            format_number(100 * cs[True] / cs.sum(), 2)
+        ))
 
     def plot_scores(
         self,
@@ -885,7 +917,7 @@ class ChurnEnsemble(object):
         y_true = dr['true']
         y_pred = dr['pred']
 
-        thr, thrs, f1, precision, recall = self.precision_recall(y_true, y_pred)
+        thr, thrs, f1, precision, recall = ChurnEnsemble.precision_recall(y_true, y_pred)
         best = thrs.index(thr)
 
         data = (
