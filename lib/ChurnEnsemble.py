@@ -29,10 +29,13 @@ from .utils import format_number, get_color
 
 class ChurnEnsemble(object):
     """
-    Churn WTTE Ensemble model for customer churn prediction.
+    Churn WTTE Ensemble: Advanced Customer Churn Prediction Model
 
-    This model combines two powerful predictive techniques, the WTTE (Weibull Time To Event) model
-    and the XGBoost model, to predict customer churn effectively.
+    Churn WTTE Ensemble is a sophisticated machine learning solution designed to predict customer churn
+    with high accuracy by combining multiple predictive models in an ensemble approach.
+    
+    This repository contains the implementation of a hybrid churn prediction system that leverages
+    both survival analysis and gradient boosting techniques to forecast customer departure behavior.
 
     WTTE Time To Event model:
     This model focuses on predicting not just if, but when a customer might stop using a service.
